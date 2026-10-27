@@ -154,6 +154,10 @@ removed and automation becomes authoritative again.
 When `/etc/pstate-anchor` is not writable (per-user install), the tray
 still holds the chosen governor for the session and says so in a notification.
 
+`userspace` is deliberately hidden from the menu and rejected by the CLI: it
+freezes the frequency until a userspace daemon takes over, which on a desktop
+simply looks like a hung session.
+
 ### Permissions for governor changes
 
 Writing `scaling_governor` needs root. The tray runs

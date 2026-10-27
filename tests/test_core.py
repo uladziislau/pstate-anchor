@@ -119,6 +119,34 @@ def test_apply_governor_is_noop_when_already_active(pstate, fake_sysfs):
     assert message == "already active"
 
 
+def test_selectable_governors_hides_userspace(pstate, tmp_path):
+    path = tmp_path / "available"
+    path.write_text("conservative ondemand userspace powersave performance schedutil\n")
+    assert pstate.selectable_governors(str(path)) == [
+        "conservative", "ondemand", "powersave", "performance", "schedutil",
+    ]
+
+
+def test_userspace_cannot_be_pinned(pstate, tmp_path, fake_sysfs):
+    pin = tmp_path / "pin"
+    ok, message = pstate.write_pin(
+        "userspace", path=str(pin), available_path=fake_sysfs["available"]
+    )
+    assert ok is False
+    assert "freezes the frequency" in message
+    assert not pin.exists()
+
+
+def test_apply_governor_rejects_userspace(pstate, fake_sysfs):
+    ok, message = pstate.apply_governor(
+        "userspace",
+        governor_path=fake_sysfs["governor"],
+        available_path=fake_sysfs["available"],
+    )
+    assert ok is False
+    assert "not supported" in message
+
+
 # ── governor pin ──────────────────────────────────────────
 
 def test_write_pin_creates_parent_directory(pstate, tmp_path, fake_sysfs):

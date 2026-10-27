@@ -54,6 +54,8 @@ First release prepared as a standalone, community-oriented project.
 
 ### Fixed
 
+- `userspace` was offered in the governor menu and could be pinned; it freezes
+  the frequency and makes the desktop look hung. It is now hidden and rejected.
 - Crash when `nvidia-smi` returned more than one line of GPU data.
 - The active governor was never check-marked when it was `schedutil`.
 

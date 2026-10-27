@@ -47,6 +47,11 @@ PROFILE_LABELS = {
 #: Fallback when the kernel does not expose scaling_available_governors.
 FALLBACK_GOVERNORS = ("schedutil", "powersave", "performance")
 
+#: Governors the kernel offers but that must not be pinned: `userspace` freezes
+#: the frequency until a userspace daemon changes it, which looks like a hung
+#: desktop. It is hidden from the menu and rejected by the CLI.
+UNSUPPORTED_GOVERNORS = ("userspace",)
+
 #: P-states offered in the tray menu when the CLI cannot enumerate them.
 DEFAULT_PSTATES = {
     "0": "Max perf",
@@ -182,6 +187,14 @@ def pin_files() -> list[str]:
     return files
 
 
+def selectable_governors(path: str = AVAILABLE_GOVERNORS_PATH) -> list[str]:
+    """Governors offered to the user: everything except UNSUPPORTED_GOVERNORS."""
+    return [
+        name for name in available_governors(path)
+        if name not in UNSUPPORTED_GOVERNORS
+    ]
+
+
 def read_pin(path: str | None = None) -> str | None:
     """Governor the user pinned against automatic tuning, if any."""
     if path is not None:
@@ -214,6 +227,10 @@ def write_pin(
                 return False, f"cannot remove {candidate}: {exc}"
         return (True, "pin cleared") if removed else (True, "no pin to clear")
 
+    if governor in UNSUPPORTED_GOVERNORS:
+        return False, (
+            f"governor {governor!r} cannot be pinned: it freezes the frequency"
+        )
     if governor not in available_governors(available_path):
         return False, f"governor {governor!r} is not available"
 
@@ -232,6 +249,10 @@ def apply_governor(
     available_path: str = AVAILABLE_GOVERNORS_PATH,
 ) -> tuple[bool, str]:
     """Set the cpufreq governor, preferring the passwordless cpupower call."""
+    if governor in UNSUPPORTED_GOVERNORS:
+        return False, (
+            f"governor {governor!r} is not supported: it freezes the frequency"
+        )
     if governor not in available_governors(available_path):
         return False, f"governor {governor!r} is not available"
     if read_governor(governor_path) == governor:
@@ -580,6 +601,7 @@ def collect_state() -> dict:
         "version": __version__,
         "governor": read_governor(),
         "available_governors": available_governors(),
+        "selectable_governors": selectable_governors(),
         "governor_pin": read_pin(),
         "pin_file": active_pin_file(),
         "pin_files": pin_files(),
@@ -757,7 +779,7 @@ if HAVE_QT:
 
             self._menu.addSeparator()
             self._section("CPU Governor")
-            for governor in available_governors():
+            for governor in selectable_governors():
                 action = self._menu.addAction(governor)
                 action.setData(("governor", governor))
                 action.setCheckable(True)
