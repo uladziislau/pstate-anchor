@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Install NVIDIA P-State Switcher.
+# Install P-State Anchor.
 #
 #   sudo ./install.sh                     # system-wide, /usr/local (recommended)
 #   ./install.sh --prefix "$HOME/.local"  # per-user, no root
 #
 # The script is idempotent: re-running upgrades the binary in place and keeps
-# the existing ~/.config/nvidia-pstate-switcher.conf untouched. It only asks for
+# the existing ~/.config/pstate-anchor.conf untouched. It only asks for
 # sudo where the target directory is not writable by the current user.
 set -euo pipefail
 
@@ -17,7 +17,7 @@ usage() {
 Usage: ./install.sh [--prefix DIR] [--no-pin-dir] [--help]
 
   --prefix DIR    install under DIR (default: /usr/local)
-  --no-pin-dir    do not create /etc/nvidia-pstate-switcher (governor pin)
+  --no-pin-dir    do not create /etc/pstate-anchor (governor pin)
   --help          show this help
 
 Exit codes: 0 success, 1 usage/environment error.
@@ -38,7 +38,7 @@ SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="$PREFIX/bin"
 SHARE_DIR="$PREFIX/share"
 ICON_DIR="$SHARE_DIR/icons/hicolor/scalable/apps"
-PIN_DIR="/etc/nvidia-pstate-switcher"
+PIN_DIR="/etc/pstate-anchor"
 
 # Is the final path (or its nearest existing parent) writable by this user?
 writable_target() {
@@ -79,11 +79,11 @@ python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' || {
   exit 1
 }
 
-place 0755 "$SRC_DIR/nvidia-pstate-switcher.py" "$BIN_DIR/nvidia-pstate-switcher"
+place 0755 "$SRC_DIR/pstate-anchor.py" "$BIN_DIR/pstate-anchor"
 
-if [ -f "$SRC_DIR/icons/nvidia-pstate-switcher.svg" ]; then
-  place 0644 "$SRC_DIR/icons/nvidia-pstate-switcher.svg" \
-    "$ICON_DIR/nvidia-pstate-switcher.svg"
+if [ -f "$SRC_DIR/icons/pstate-anchor.svg" ]; then
+  place 0644 "$SRC_DIR/icons/pstate-anchor.svg" \
+    "$ICON_DIR/pstate-anchor.svg"
   if command -v gtk-update-icon-cache >/dev/null 2>&1 &&
      [ -d "$SHARE_DIR/icons/hicolor" ]; then
     gtk-update-icon-cache -q -t -f "$SHARE_DIR/icons/hicolor" 2>/dev/null || true
@@ -110,7 +110,7 @@ if [ "$CREATE_PIN_DIR" -eq 1 ]; then
   fi
 fi
 
-echo "installed: $BIN_DIR/nvidia-pstate-switcher"
+echo "installed: $BIN_DIR/pstate-anchor"
 echo
 
 missing=()
@@ -128,6 +128,6 @@ if [ ${#missing[@]} -gt 0 ]; then
   echo
 fi
 
-echo "verify:  $BIN_DIR/nvidia-pstate-switcher --dump-state"
-echo "start:   $BIN_DIR/nvidia-pstate-switcher"
-echo "autostart: $BIN_DIR/nvidia-pstate-switcher --autostart on"
+echo "verify:  $BIN_DIR/pstate-anchor --dump-state"
+echo "start:   $BIN_DIR/pstate-anchor"
+echo "autostart: $BIN_DIR/pstate-anchor --autostart on"

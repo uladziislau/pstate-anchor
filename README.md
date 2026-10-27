@@ -1,10 +1,10 @@
-# NVIDIA P-State Switcher
+# P-State Anchor
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
 [![PyQt6](https://img.shields.io/badge/PyQt-6-green.svg)](https://riverbankcomputing.com/software/pyqt/)
-[![CI](https://github.com/uladziislau/nvidia-pstate-switcher/actions/workflows/ci.yml/badge.svg)](https://github.com/uladziislau/nvidia-pstate-switcher/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/github/v/tag/uladziislau/nvidia-pstate-switcher?label=version&color=blue)](https://github.com/uladziislau/nvidia-pstate-switcher/tags)
+[![CI](https://github.com/uladziislau/pstate-anchor/actions/workflows/ci.yml/badge.svg)](https://github.com/uladziislau/pstate-anchor/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/github/v/tag/uladziislau/pstate-anchor?label=version&color=blue)](https://github.com/uladziislau/pstate-anchor/tags)
 
 > **Русский**: [README.ru.md](README.ru.md)
 
@@ -65,22 +65,22 @@ pip install --user nvidia-pstate     # or: pipx install nvidia-pstate
 ## Install
 
 ```bash
-git clone https://github.com/uladziislau/nvidia-pstate-switcher
-cd nvidia-pstate-switcher
+git clone https://github.com/uladziislau/pstate-anchor
+cd pstate-anchor
 sudo ./install.sh                     # into /usr/local
 ./install.sh --prefix "$HOME/.local"  # or per-user only
 ```
 
 The installer drops one file, an icon and the governor-pin directory
-(`/etc/nvidia-pstate-switcher` when run as root). It never overwrites your
+(`/etc/pstate-anchor` when run as root). It never overwrites your
 configuration and is idempotent.
 
 Manual one-liner, without cloning:
 
 ```bash
-curl -LO https://raw.githubusercontent.com/uladziislau/nvidia-pstate-switcher/main/nvidia-pstate-switcher.py
-chmod +x nvidia-pstate-switcher.py
-sudo install -m 0755 nvidia-pstate-switcher.py /usr/local/bin/nvidia-pstate-switcher
+curl -LO https://raw.githubusercontent.com/uladziislau/pstate-anchor/main/pstate-anchor.py
+chmod +x pstate-anchor.py
+sudo install -m 0755 pstate-anchor.py /usr/local/bin/pstate-anchor
 ```
 
 > **GNOME users** need `gnome-shell-extension-appindicator` for tray icons.
@@ -90,7 +90,7 @@ sudo install -m 0755 nvidia-pstate-switcher.py /usr/local/bin/nvidia-pstate-swit
 ### Tray
 
 ```bash
-nvidia-pstate-switcher
+pstate-anchor
 ```
 
 Right-click for the menu, double-click to refresh immediately. Starting it again
@@ -99,13 +99,13 @@ does not spawn a second process — it surfaces the running instance.
 ### CLI
 
 ```bash
-nvidia-pstate-switcher --dump-state            # JSON machine state
-nvidia-pstate-switcher --pstate 5              # P5 (idle), then exit
-nvidia-pstate-switcher --pstate 16             # hand control back to the driver
-nvidia-pstate-switcher --governor schedutil    # set and pin the governor
-nvidia-pstate-switcher --unpin-governor        # release the pin
-nvidia-pstate-switcher --profile power-saver   # KDE profile, then exit
-nvidia-pstate-switcher --version
+pstate-anchor --dump-state            # JSON machine state
+pstate-anchor --pstate 5              # P5 (idle), then exit
+pstate-anchor --pstate 16             # hand control back to the driver
+pstate-anchor --governor schedutil    # set and pin the governor
+pstate-anchor --unpin-governor        # release the pin
+pstate-anchor --profile power-saver   # KDE profile, then exit
+pstate-anchor --version
 ```
 
 `--dump-state` reports version, governor, available governors, pin, profile, GPU
@@ -113,7 +113,7 @@ data, RAPL availability and discovered dependencies. Tests and monitoring
 scripts use the same path:
 
 ```bash
-nvidia-pstate-switcher --dump-state | jq .gpu.power_w
+pstate-anchor --dump-state | jq .gpu.power_w
 ```
 
 ## Governor pin: why a manual choice "resets itself"
@@ -126,7 +126,7 @@ looks like "the tray does not work".
 How the pin fixes that:
 
 1. You pick a governor in the menu → it is applied and written to
-   `/etc/nvidia-pstate-switcher/governor-pin` (override with `PSTATE_PIN_FILE`).
+   `/etc/pstate-anchor/governor-pin` (override with `PSTATE_PIN_FILE`).
 2. Every 2 seconds the tray compares the live governor with the pin and
    re-applies the pinned value if something changed it.
 3. Third-party watchdogs must honour the pin: when the file exists and holds a
@@ -136,7 +136,7 @@ How the pin fixes that:
 Release the pin with **Follow system (unpin)** or `--unpin-governor`; the file is
 removed and automation becomes authoritative again.
 
-When `/etc/nvidia-pstate-switcher` is not writable (per-user install), the tray
+When `/etc/pstate-anchor` is not writable (per-user install), the tray
 still holds the chosen governor for the session and says so in a notification.
 
 ### Permissions for governor changes
@@ -154,7 +154,8 @@ of failing silently.
 
 ## Configuration
 
-`~/.config/nvidia-pstate-switcher.conf`:
+`~/.config/pstate-anchor.conf` (the pre-rename file
+`~/.config/nvidia-pstate-switcher.conf` is read once and honoured):
 
 ```json
 {
@@ -227,7 +228,7 @@ The tool grew out of debugging why a GTX 1660 SUPER stayed in P0 on Wayland:
 python3 -m venv .venv && .venv/bin/pip install pytest ruff
 .venv/bin/ruff check .
 .venv/bin/pytest -q
-./nvidia-pstate-switcher.py --dump-state
+./pstate-anchor.py --dump-state
 ```
 
 CI runs byte-compile, ruff, the test suite on Python 3.10–3.13, a CLI contract
@@ -239,7 +240,7 @@ external subsystems are replaced by temporary directories and parsers.
 Uladzislau Darazhei — [github.com/uladziislau](https://github.com/uladziislau).
 
 Contributions are welcome: open an issue with the output of
-`nvidia-pstate-switcher --dump-state` and your desktop environment when
+`pstate-anchor --dump-state` and your desktop environment when
 reporting a problem.
 
 ## License

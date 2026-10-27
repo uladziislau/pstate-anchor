@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Example cpufreq guard that respects the nvidia-pstate-switcher governor pin.
+# Example cpufreq guard that respects the pstate-anchor governor pin.
 #
 # Purpose: some systems force a governor back (for example to keep schedutil
 # for sched_ext, or to undo power-profiles-daemon setting `powersave`). Such a
 # guard must not fight the user, so it honours the pin written by the tray:
 #
-#   /etc/nvidia-pstate-switcher/governor-pin   (override: PSTATE_PIN_FILE)
+#   /etc/pstate-anchor/governor-pin   (override: PSTATE_PIN_FILE)
 #
 # Behaviour
 #   - pin present and valid  → enforce the pinned governor
@@ -36,7 +36,7 @@ set -euo pipefail
 
 GOV_PATH="${PSTATE_GOVERNOR_PATH:-/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor}"
 AVAILABLE_PATH="${PSTATE_AVAILABLE_GOVERNORS_PATH:-/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors}"
-PIN_FILE="${PSTATE_PIN_FILE:-/etc/nvidia-pstate-switcher/governor-pin}"
+PIN_FILE="${PSTATE_PIN_FILE:-/etc/pstate-anchor/governor-pin}"
 DEFAULT_GOVERNOR="${DEFAULT_GOVERNOR:-schedutil}"
 
 [ -r "$GOV_PATH" ] || exit 0

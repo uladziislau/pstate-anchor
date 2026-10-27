@@ -16,7 +16,7 @@ First release prepared as a standalone, community-oriented project.
   `scaling_available_governors` instead of a hardcoded pair; `schedutil` is now
   selectable.
 - **Governor pin**: an explicit choice is written to
-  `/etc/nvidia-pstate-switcher/governor-pin` (override with `PSTATE_PIN_FILE`)
+  `/etc/pstate-anchor/governor-pin` (override with `PSTATE_PIN_FILE`)
   and re-applied by the tray, so automation such as a cpufreq watchdog no
   longer silently reverts it. `--unpin-governor` hands control back.
 - **CLI**: `--version`, `--dump-state` (JSON, works without Qt or a GPU),
@@ -33,6 +33,9 @@ First release prepared as a standalone, community-oriented project.
 
 ### Changed
 
+- Project renamed to **P-State Anchor** (`pstate-anchor`). The tray reads the
+  old `~/.config/nvidia-pstate-switcher.conf` once and removes autostart and
+  desktop files that still point at the pre-rename binary.
 - PyQt6 is imported lazily: every read-only path works on machines without GUI
   libraries, and the error message explains what to install.
 - The tray's IPC socket lives in `$XDG_RUNTIME_DIR` instead of a world-accessible

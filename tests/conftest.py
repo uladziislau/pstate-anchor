@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parent.parent / "nvidia-pstate-switcher.py"
+SCRIPT = Path(__file__).resolve().parent.parent / "pstate-anchor.py"
 
 
 def _load_module():

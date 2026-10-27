@@ -26,7 +26,7 @@ jobs:
         run: python -m pip install --upgrade pip pytest ruff
 
       - name: Byte-compile
-        run: python -m py_compile nvidia-pstate-switcher.py
+        run: python -m py_compile pstate-anchor.py
 
       - name: Lint
         run: ruff check .
@@ -36,8 +36,8 @@ jobs:
 
       - name: CLI contract
         run: |
-          python nvidia-pstate-switcher.py --version
-          python nvidia-pstate-switcher.py --dump-state | python -c \
+          python pstate-anchor.py --version
+          python pstate-anchor.py --dump-state | python -c \
             "import json,sys; s=json.load(sys.stdin); assert s['version']; assert 'available_governors' in s"
 
   shellcheck:

@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parent.parent / "nvidia-pstate-switcher.py"
+SCRIPT = Path(__file__).resolve().parent.parent / "pstate-anchor.py"
 
 
 # ── config ────────────────────────────────────────────────
@@ -41,6 +41,44 @@ def test_save_config_roundtrip_creates_parents(pstate, tmp_path):
     conf = tmp_path / "deep" / "nested" / "conf.json"
     pstate.save_config({"pstate": "8", "autostart": False, "governor": "performance"}, str(conf))
     assert pstate.load_config(str(conf))["governor"] == "performance"
+
+
+def test_load_config_falls_back_to_legacy_file(pstate, tmp_path, monkeypatch):
+    legacy = tmp_path / "nvidia-pstate-switcher.conf"
+    legacy.write_text('{"pstate": "5", "autostart": false}')
+    monkeypatch.setattr(pstate, "CONFIG_FILE", str(tmp_path / "pstate-anchor.conf"))
+    monkeypatch.setattr(pstate, "LEGACY_CONFIG_FILE", str(legacy))
+
+    cfg = pstate.load_config(str(tmp_path / "pstate-anchor.conf"))
+    assert cfg["pstate"] == "5"
+    assert cfg["autostart"] is False
+
+
+def test_own_config_wins_over_legacy(pstate, tmp_path, monkeypatch):
+    legacy = tmp_path / "nvidia-pstate-switcher.conf"
+    legacy.write_text('{"pstate": "5"}')
+    own = tmp_path / "pstate-anchor.conf"
+    own.write_text('{"pstate": "8"}')
+    monkeypatch.setattr(pstate, "CONFIG_FILE", str(own))
+    monkeypatch.setattr(pstate, "LEGACY_CONFIG_FILE", str(legacy))
+    assert pstate.load_config(str(own))["pstate"] == "8"
+
+
+def test_cleanup_legacy_entries_removes_only_old_artefacts(pstate, tmp_path, monkeypatch):
+    old_autostart = tmp_path / "autostart-old.desktop"
+    old_autostart.write_text("Exec=/usr/local/bin/nvidia-pstate-switcher\n")
+    old_desktop = tmp_path / "desktop-old.desktop"
+    old_desktop.write_text("Exec=/usr/local/bin/nvidia-pstate-switcher\n")
+    user_file = tmp_path / "user-edit.desktop"
+    user_file.write_text("Exec=/opt/custom/pstate-anchor --tray\n")
+
+    monkeypatch.setattr(pstate, "LEGACY_AUTOSTART_FILE", str(old_autostart))
+    monkeypatch.setattr(pstate, "LEGACY_DESKTOP_FILE", str(user_file))
+
+    removed = pstate.cleanup_legacy_entries()
+    assert str(old_autostart) in removed
+    assert not old_autostart.exists()
+    assert user_file.exists(), "hand-edited file must survive"
 
 
 # ── cpufreq ───────────────────────────────────────────────
@@ -84,7 +122,7 @@ def test_apply_governor_is_noop_when_already_active(pstate, fake_sysfs):
 # ── governor pin ──────────────────────────────────────────
 
 def test_write_pin_creates_parent_directory(pstate, tmp_path, fake_sysfs):
-    pin = tmp_path / "etc" / "nvidia-pstate-switcher" / "governor-pin"
+    pin = tmp_path / "etc" / "pstate-anchor" / "governor-pin"
     ok, message = pstate.write_pin(
         "performance", path=str(pin), available_path=fake_sysfs["available"]
     )
@@ -95,7 +133,7 @@ def test_write_pin_creates_parent_directory(pstate, tmp_path, fake_sysfs):
 
 
 def test_active_pin_file_prefers_system_dir_when_writable(pstate, tmp_path, monkeypatch):
-    system = tmp_path / "etc" / "nvidia-pstate-switcher" / "governor-pin"
+    system = tmp_path / "etc" / "pstate-anchor" / "governor-pin"
     system.parent.mkdir(parents=True)
     monkeypatch.setattr(pstate, "PIN_FILE", str(system))
     monkeypatch.setattr(pstate, "USER_PIN_FILE", str(tmp_path / "user-pin"))
@@ -104,7 +142,7 @@ def test_active_pin_file_prefers_system_dir_when_writable(pstate, tmp_path, monk
 
 def test_active_pin_file_falls_back_to_user_dir(pstate, tmp_path, monkeypatch):
     missing_system = tmp_path / "no-such-etc" / "governor-pin"
-    user_pin = tmp_path / "config" / "nvidia-pstate-switcher" / "governor-pin"
+    user_pin = tmp_path / "config" / "pstate-anchor" / "governor-pin"
     monkeypatch.setattr(pstate, "PIN_FILE", str(missing_system))
     monkeypatch.setattr(pstate, "USER_PIN_FILE", str(user_pin))
     assert pstate.active_pin_file() == str(user_pin)
@@ -232,12 +270,12 @@ def test_read_rapl_counters_returns_none_when_unreadable(pstate, tmp_path):
 # ── desktop integration ───────────────────────────────────
 
 def test_autostart_toggle_writes_and_removes_entry(pstate, tmp_path, monkeypatch):
-    autostart = tmp_path / "autostart" / "nvidia-pstate-switcher.desktop"
-    monkeypatch.setattr(pstate.sys, "argv", ["/opt/bin/nvidia-pstate-switcher"])
+    autostart = tmp_path / "autostart" / "pstate-anchor.desktop"
+    monkeypatch.setattr(pstate.sys, "argv", ["/opt/bin/pstate-anchor"])
     pstate.set_autostart(True, str(autostart))
     content = autostart.read_text()
     assert "X-KDE-autostart-condition=true" in content
-    assert "Exec=/opt/bin/nvidia-pstate-switcher" in content
+    assert "Exec=/opt/bin/pstate-anchor" in content
     assert pstate.autostart_enabled(str(autostart)) is True
 
     pstate.set_autostart(False, str(autostart))
@@ -246,7 +284,7 @@ def test_autostart_toggle_writes_and_removes_entry(pstate, tmp_path, monkeypatch
 
 
 def test_ensure_desktop_entry_is_idempotent(pstate, tmp_path):
-    desktop = tmp_path / "applications" / "nvidia-pstate-switcher.desktop"
+    desktop = tmp_path / "applications" / "pstate-anchor.desktop"
     pstate.ensure_desktop_entry(str(desktop))
     first = desktop.read_text()
     assert "X-KDE-autostart-condition" not in first

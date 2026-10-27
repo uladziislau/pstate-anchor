@@ -8,11 +8,11 @@
         ],
         "Category": "System Information",
         "Description": "Shows the current NVIDIA GPU performance state and power draw",
-        "Id": "org.nvidia.pstate.monitor",
+        "Id": "org.pstateanchor.monitor",
         "License": "MIT",
-        "Name": "NVIDIA P-State",
+        "Name": "P-State Anchor",
         "Version": "0.2026.10.27",
-        "Website": "https://github.com/uladziislau/nvidia-pstate-switcher"
+        "Website": "https://github.com/uladziislau/pstate-anchor"
     },
     "X-Plasma-API": "declarative",
     "X-Plasma-MainAPI": "declarative"

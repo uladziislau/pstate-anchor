@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Uninstall NVIDIA P-State Switcher.
+# Uninstall P-State Anchor.
 #
 #   sudo ./uninstall.sh                       # remove from /usr/local
 #   ./uninstall.sh --prefix "$HOME/.local"    # remove a per-user install
@@ -10,7 +10,7 @@ set -euo pipefail
 
 PREFIX="/usr/local"
 PURGE=0
-PIN_DIR="/etc/nvidia-pstate-switcher"
+PIN_DIR="/etc/pstate-anchor"
 
 usage() {
   cat <<'EOF'
@@ -32,8 +32,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-BIN="$PREFIX/bin/nvidia-pstate-switcher"
-ICON="$PREFIX/share/icons/hicolor/scalable/apps/nvidia-pstate-switcher.svg"
+BIN="$PREFIX/bin/pstate-anchor"
+ICON="$PREFIX/share/icons/hicolor/scalable/apps/pstate-anchor.svg"
 
 as_root() {
   if [ "$(id -u)" -eq 0 ]; then
@@ -46,8 +46,8 @@ as_root() {
 package_installed=0
 [ -e "$BIN" ] && package_installed=1
 
-if pgrep -f "nvidia-pstate-switcher" >/dev/null 2>&1; then
-  pkill -f "nvidia-pstate-switcher" || true
+if pgrep -f "pstate-anchor" >/dev/null 2>&1; then
+  pkill -f "pstate-anchor" || true
   echo "stopped running instance"
 fi
 
@@ -63,9 +63,9 @@ fi
 
 if [ "$PURGE" -eq 1 ]; then
   CONFIG_BASE="${XDG_CONFIG_HOME:-$HOME/.config}"
-  rm -f "$CONFIG_BASE/nvidia-pstate-switcher.conf"
-  rm -f "$CONFIG_BASE/autostart/nvidia-pstate-switcher.desktop"
-  rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/nvidia-pstate-switcher.desktop"
+  rm -f "$CONFIG_BASE/pstate-anchor.conf"
+  rm -f "$CONFIG_BASE/autostart/pstate-anchor.desktop"
+  rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/applications/pstate-anchor.desktop"
   echo "removed user config, autostart and desktop entries"
   if [ -d "$PIN_DIR" ] && { [ "$(id -u)" -eq 0 ] || sudo -n true 2>/dev/null; }; then
     as_root rm -rf "$PIN_DIR"

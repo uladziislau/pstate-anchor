@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NVIDIA P-State Switcher — system tray for NVIDIA GPU P-states, CPU governor
+"""P-State Anchor — system tray for NVIDIA GPU P-states, CPU governor
 and KDE Power Profiles.
 
 The script is intentionally a single file: installation is one `curl` + `chmod`.
@@ -61,7 +61,7 @@ CONFIG_FILE = os.environ.get(
     "PSTATE_CONFIG_FILE",
     os.path.join(
         os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
-        "nvidia-pstate-switcher.conf",
+        "pstate-anchor.conf",
     ),
 )
 AUTOSTART_FILE = os.environ.get(
@@ -69,7 +69,7 @@ AUTOSTART_FILE = os.environ.get(
     os.path.join(
         os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
         "autostart",
-        "nvidia-pstate-switcher.desktop",
+        "pstate-anchor.desktop",
     ),
 )
 DESKTOP_FILE = os.environ.get(
@@ -77,18 +77,31 @@ DESKTOP_FILE = os.environ.get(
     os.path.join(
         os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"),
         "applications",
-        "nvidia-pstate-switcher.desktop",
+        "pstate-anchor.desktop",
     ),
 )
+#: Pre-rename artefact names (nvidia-pstate-switcher). Read once so that an
+#: existing installation keeps its configuration and stops autostarting twice.
+LEGACY_NAME = "nvidia-pstate-switcher"
+CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+DATA_HOME = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+LEGACY_CONFIG_FILE = os.path.join(CONFIG_HOME, f"{LEGACY_NAME}.conf")
+LEGACY_AUTOSTART_FILE = os.path.join(
+    CONFIG_HOME, "autostart", f"{LEGACY_NAME}.desktop"
+)
+LEGACY_DESKTOP_FILE = os.path.join(
+    DATA_HOME, "applications", f"{LEGACY_NAME}.desktop"
+)
+
 #: Governor pin. Written by the tray/CLI, read by external guards so that a
 #: manual choice survives automation such as cpufreq-schedutil-guard.timer.
 PIN_FILE = os.environ.get(
-    "PSTATE_PIN_FILE", "/etc/nvidia-pstate-switcher/governor-pin"
+    "PSTATE_PIN_FILE", "/etc/pstate-anchor/governor-pin"
 )
 #: Fallback pin used when the system directory is not writable (per-user
 #: install). Same contract, different location.
 USER_PIN_FILE = os.path.join(
-    os.path.dirname(CONFIG_FILE), "nvidia-pstate-switcher", "governor-pin"
+    os.path.dirname(CONFIG_FILE), "pstate-anchor", "governor-pin"
 )
 GOVERNOR_PATH = os.environ.get(
     "PSTATE_GOVERNOR_PATH",
@@ -108,7 +121,7 @@ IPC_SOCKET = os.environ.get(
     "PSTATE_IPC_SOCKET",
     os.path.join(
         os.environ.get("XDG_RUNTIME_DIR") or "/tmp",
-        "nvidia-pstate-switcher.sock",
+        "pstate-anchor.sock",
     ),
 )
 
@@ -315,8 +328,11 @@ DEFAULT_CONFIG = {"pstate": PSTATE_AUTO, "autostart": True, "governor": None}
 
 def load_config(path: str = CONFIG_FILE) -> dict:
     cfg = dict(DEFAULT_CONFIG)
+    source = path
+    if path == CONFIG_FILE and not os.path.isfile(path):
+        source = LEGACY_CONFIG_FILE
     try:
-        with open(path, encoding="utf-8") as handle:
+        with open(source, encoding="utf-8") as handle:
             stored = json.load(handle)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return cfg
@@ -339,10 +355,10 @@ def _desktop_entry(exec_path: str, autostart: bool) -> str:
     lines = [
         "[Desktop Entry]",
         "Type=Application",
-        "Name=NVIDIA P-State Switcher",
+        "Name=P-State Anchor",
         "Comment=GPU P-state, CPU governor, Power Profiles, Power monitor",
         f"Exec={exec_path}",
-        "Icon=nvidia-pstate-switcher",
+        "Icon=pstate-anchor",
         "Categories=System;Hardware;",
         "Terminal=false",
         "StartupNotify=false",
@@ -361,8 +377,8 @@ def _exec_path() -> str:
         found = shutil.which(argv0)
         if found:
             return os.path.abspath(found)
-    found = shutil.which("nvidia-pstate-switcher")
-    return os.path.abspath(found) if found else "nvidia-pstate-switcher"
+    found = shutil.which("pstate-anchor")
+    return os.path.abspath(found) if found else "pstate-anchor"
 
 
 def autostart_enabled(path: str = AUTOSTART_FILE) -> bool:
@@ -377,6 +393,29 @@ def set_autostart(enabled: bool, path: str = AUTOSTART_FILE) -> None:
         return
     with contextlib.suppress(FileNotFoundError):
         os.remove(path)
+
+
+def cleanup_legacy_entries() -> list[str]:
+    """Remove autostart/desktop files left by the pre-rename installation.
+
+    Only files that still point at the old binary are touched, so a file the
+    user edited by hand is never destroyed by mistake.
+    """
+    removed = []
+    for path in (LEGACY_AUTOSTART_FILE, LEGACY_DESKTOP_FILE):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                content = handle.read()
+        except OSError:
+            continue
+        if LEGACY_NAME not in content:
+            continue
+        try:
+            os.remove(path)
+            removed.append(path)
+        except OSError:
+            continue
+    return removed
 
 
 def ensure_desktop_entry(path: str = DESKTOP_FILE) -> None:
@@ -666,6 +705,7 @@ if HAVE_QT:
             self._pstates = dict(DEFAULT_PSTATES)
 
             ensure_desktop_entry()
+            cleanup_legacy_entries()
 
             self._smi_bin = _binary("nvidia-smi") or "nvidia-smi"
             self._pstate_bin = _binary("nvidia-pstate") or "nvidia-pstate"
@@ -696,7 +736,7 @@ if HAVE_QT:
 
             self.activated.connect(self._on_activate)
             self.setIcon(_render_icon("—"))
-            self.setToolTip("NVIDIA P-State Switcher")
+            self.setToolTip("P-State Anchor")
             self.show()
             self._refresh()
 
@@ -899,7 +939,7 @@ if HAVE_QT:
             )
 
             self.setToolTip(
-                f"NVIDIA P-State Switcher {__version__}\n"
+                f"P-State Anchor {__version__}\n"
                 f"GPU P{self._current_label}  {power.gpu_now:.1f} W\n"
                 f"CPU {governor}   Pin: {pin}\n"
                 f"Profile {profile}\n"
@@ -918,7 +958,7 @@ if HAVE_QT:
                 and connection.readAll().data() == b"show_menu"
             ):
                 self._notify(
-                    "NVIDIA P-State Switcher",
+                    "P-State Anchor",
                     "Already running — check the system tray.",
                 )
             connection.close()
@@ -963,7 +1003,7 @@ def run_tray() -> int:
     if _notify_running_instance():
         return 0
     app = QtWidgets.QApplication(sys.argv)
-    app.setApplicationName("nvidia-pstate-switcher")
+    app.setApplicationName("pstate-anchor")
     app.setQuitOnLastWindowClosed(False)
     _tray = TrayApp()  # noqa: F841 - must stay referenced
     return app.exec()
@@ -971,7 +1011,7 @@ def run_tray() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="nvidia-pstate-switcher",
+        prog="pstate-anchor",
         description=(
             "System tray for NVIDIA GPU P-states, CPU governor and "
             "KDE Power Profiles. Without arguments it starts the tray."
@@ -1045,6 +1085,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.autostart is not None:
+        cleanup_legacy_entries()
         enabled = args.autostart == "on"
         set_autostart(enabled)
         cfg = load_config()
