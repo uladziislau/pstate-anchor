@@ -1,0 +1,19 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Uladzislau Darazhei"
+            }
+        ],
+        "Category": "System Information",
+        "Description": "Shows the current NVIDIA GPU performance state and power draw",
+        "Id": "org.nvidia.pstate.monitor",
+        "License": "MIT",
+        "Name": "NVIDIA P-State",
+        "Version": "2.0.0",
+        "Website": "https://github.com/uladziislau/nvidia-pstate-switcher"
+    },
+    "X-Plasma-API": "declarative",
+    "X-Plasma-MainAPI": "declarative"
+}

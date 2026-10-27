@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: pytest ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install test tooling
+        run: python -m pip install --upgrade pip pytest ruff
+
+      - name: Byte-compile
+        run: python -m py_compile nvidia-pstate-switcher.py
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Tests (no Qt, no GPU)
+        run: python -m pytest -q
+
+      - name: CLI contract
+        run: |
+          python nvidia-pstate-switcher.py --version
+          python nvidia-pstate-switcher.py --dump-state | python -c \
+            "import json,sys; s=json.load(sys.stdin); assert s['version']; assert 'available_governors' in s"
+
+  shellcheck:
+    name: shellcheck installers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Check scripts
+        run: shellcheck install.sh uninstall.sh

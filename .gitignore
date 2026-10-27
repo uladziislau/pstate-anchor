@@ -4,3 +4,8 @@ __pycache__/
 # Editor backups (Windscribe и подобные)
 *.bak
 *-bak
+
+# local tooling
+.venv/
+.pytest_cache/
+.ruff_cache/

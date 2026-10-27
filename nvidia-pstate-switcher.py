@@ -1,250 +1,472 @@
 #!/usr/bin/env python3
-"""
-System Tuning Tray — GPU P-state, CPU governor, Power Profile integration,
-and per-unit power monitoring (instantaneous + 1-min average).
+"""NVIDIA P-State Switcher — system tray for NVIDIA GPU P-states, CPU governor
+and KDE Power Profiles.
 
-Uses async QProcess to never block the UI thread.
+The script is intentionally a single file: installation is one `curl` + `chmod`.
+PyQt6 is imported lazily so that every read-only code path (state dump, CLI
+control, tests, CI) works on a machine without GUI libraries.
+
+Licensed under the MIT license; see LICENSE.
 """
+
+from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
-import socket
 import subprocess
 import sys
+import time
 from collections import deque
 from statistics import mean
-from typing import Optional
 
-from PyQt6 import QtCore, QtGui, QtNetwork, QtWidgets
-from PyQt6 import QtDBus
+__version__ = "2.0.0"
 
-# ── constants ──────────────────────────────────────────────
+# ── configuration surface ─────────────────────────────────
+# Every path below can be overridden through the environment. That keeps the
+# code testable (temporary directories, fake sysfs trees) and portable across
+# distributions that place RAPL counters differently.
 
-# KDE Power Profile → GPU P-state + CPU governor
+PSTATE_AUTO = "16"  # nvidia-pstate: 16 == let the driver decide
+
+#: KDE Power Profile → (GPU P-state, CPU governor)
 PROFILE_MAP = {
-    "power-saver":  {"pstate": "5",  "governor": "powersave"},
-    "balanced":     {"pstate": "2",  "governor": "powersave"},
-    "performance":  {"pstate": "0",  "governor": "performance"},
+    "power-saver": {"pstate": "5", "governor": "schedutil"},
+    "balanced": {"pstate": PSTATE_AUTO, "governor": "schedutil"},
+    "performance": {"pstate": "0", "governor": "schedutil"},
 }
 
 PROFILE_LABELS = {
     "power-saver": "🔋 Power Saver",
-    "balanced":    "⚖️  Balanced",
+    "balanced": "⚖️  Balanced",
     "performance": "🚀 Performance",
 }
 
-GOVERNOR_LABELS = {
-    "powersave":    "powersave (dynamic)",
-    "performance":  "performance (max freq)",
-}
+#: Fallback when the kernel does not expose scaling_available_governors.
+FALLBACK_GOVERNORS = ("schedutil", "powersave", "performance")
 
+#: P-states offered in the tray menu when the CLI cannot enumerate them.
 DEFAULT_PSTATES = {
     "0": "Max perf",
     "2": "Balanced",
     "3": "Medium",
     "5": "Idle",
     "8": "Deep idle",
+    PSTATE_AUTO: "Auto (driver control)",
 }
 
-CONFIG_DIR = os.path.expanduser("~/.config")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "nvidia-pstate-switcher.conf")
-AUTOSTART_FILE = os.path.expanduser(
-    "~/.config/autostart/nvidia-pstate-switcher.desktop"
+CONFIG_FILE = os.environ.get(
+    "PSTATE_CONFIG_FILE",
+    os.path.join(
+        os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+        "nvidia-pstate-switcher.conf",
+    ),
 )
-AUTOSTART_ENTRY = (
-    "[Desktop Entry]\n"
-    "Type=Application\n"
-    "Name=System Tuning Tray\n"
-    "Comment=GPU P-state, CPU governor, Power Profiles, Power Monitor\n"
-    f"Exec=/usr/local/bin/nvidia-pstate-switcher\n"
-    "Icon=nvidia-pstate-switcher\n"
-    "Categories=System;Hardware;\n"
-    "Terminal=false\n"
-    "StartupNotify=false\n"
-    "X-KDE-autostart-condition=true\n"
+AUTOSTART_FILE = os.environ.get(
+    "PSTATE_AUTOSTART_FILE",
+    os.path.join(
+        os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+        "autostart",
+        "nvidia-pstate-switcher.desktop",
+    ),
 )
-APP_DESKTOP_PATH = os.path.expanduser(
-    "~/.local/share/applications/nvidia-pstate-switcher.desktop"
+DESKTOP_FILE = os.environ.get(
+    "PSTATE_DESKTOP_FILE",
+    os.path.join(
+        os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"),
+        "applications",
+        "nvidia-pstate-switcher.desktop",
+    ),
 )
-APP_DESKTOP_ENTRY = (
-    "[Desktop Entry]\n"
-    "Type=Application\n"
-    "Name=System Tuning Tray\n"
-    "Comment=GPU P-state, CPU governor, Power Profiles, Power Monitor\n"
-    "Exec=/usr/local/bin/nvidia-pstate-switcher\n"
-    "Icon=nvidia-pstate-switcher\n"
-    "Categories=System;Hardware;\n"
-    "Terminal=false\n"
-    "StartupNotify=false\n"
+#: Governor pin. Written by the tray/CLI, read by external guards so that a
+#: manual choice survives automation such as cpufreq-schedutil-guard.timer.
+PIN_FILE = os.environ.get(
+    "PSTATE_PIN_FILE", "/etc/nvidia-pstate-switcher/governor-pin"
 )
-IPC_SERVER = "nvidia-pstate-switcher"
-IPC_SOCKET = os.path.join("/tmp", IPC_SERVER)
+#: Fallback pin used when the system directory is not writable (per-user
+#: install). Same contract, different location.
+USER_PIN_FILE = os.path.join(
+    os.path.dirname(CONFIG_FILE), "nvidia-pstate-switcher", "governor-pin"
+)
+GOVERNOR_PATH = os.environ.get(
+    "PSTATE_GOVERNOR_PATH",
+    "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor",
+)
+AVAILABLE_GOVERNORS_PATH = os.environ.get(
+    "PSTATE_AVAILABLE_GOVERNORS_PATH",
+    "/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors",
+)
+RAPL_PKG_PATH = os.environ.get(
+    "PSTATE_RAPL_PKG", "/sys/class/powercap/intel-rapl:0/energy_uj"
+)
+RAPL_DRAM_PATH = os.environ.get(
+    "PSTATE_RAPL_DRAM", "/sys/class/powercap/intel-rapl:0:0/energy_uj"
+)
+IPC_SOCKET = os.environ.get(
+    "PSTATE_IPC_SOCKET",
+    os.path.join(
+        os.environ.get("XDG_RUNTIME_DIR") or "/tmp",
+        "nvidia-pstate-switcher.sock",
+    ),
+)
 
-CPU_GOVERNOR_PATH = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"
+POWER_HISTORY_SECONDS = 60
+REFRESH_INTERVAL_SECONDS = 2.0
+PIN_RETRY_SECONDS = 10.0
 
 PP_SERVICE = "net.hadess.PowerProfiles"
-PP_PATH    = "/net/hadess/PowerProfiles"
-PP_IFACE   = "net.hadess.PowerProfiles"
-PP_PROPS   = "org.freedesktop.DBus.Properties"
-
-POWER_HISTORY_SECONDS = 60  # rolling window for 1-min average
+PP_PATH = "/net/hadess/PowerProfiles"
+PP_IFACE = "net.hadess.PowerProfiles"
 
 
-# ── helpers ────────────────────────────────────────────────
+# ── filesystem helpers ────────────────────────────────────
 
-def _resolve_bin(name: str) -> str:
-    found = shutil.which(name)
-    if found:
-        return found
-    local = os.path.expanduser(f"~/.local/bin/{name}")
-    if os.path.isfile(local) and os.access(local, os.X_OK):
-        return local
-    return name
-
-
-def _load_config() -> dict:
+def _read_text(path: str) -> str | None:
     try:
-        with open(CONFIG_FILE) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"pstate": "16", "autostart": True}
+        with open(path, encoding="utf-8") as handle:
+            return handle.read().strip()
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
 
 
-def _save_config(cfg: dict) -> None:
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(cfg, f)
+def read_governor(path: str = GOVERNOR_PATH) -> str | None:
+    """Current cpufreq governor, or None when cpufreq is unavailable."""
+    value = _read_text(path)
+    return value or None
 
 
-def _autostart_enabled() -> bool:
-    return os.path.isfile(AUTOSTART_FILE)
+def available_governors(path: str = AVAILABLE_GOVERNORS_PATH) -> list[str]:
+    """Governors offered by the running kernel, fallback to a sane default."""
+    raw = _read_text(path)
+    if not raw:
+        return list(FALLBACK_GOVERNORS)
+    names = [name for name in raw.split() if name]
+    return names or list(FALLBACK_GOVERNORS)
 
 
-def _set_autostart(enabled: bool) -> None:
-    if enabled:
-        os.makedirs(os.path.dirname(AUTOSTART_FILE), exist_ok=True)
-        with open(AUTOSTART_FILE, "w") as f:
-            f.write(AUTOSTART_ENTRY)
-    else:
-        try:
-            os.remove(AUTOSTART_FILE)
-        except FileNotFoundError:
-            pass
+def active_pin_file() -> str:
+    """Pin location that can actually be written on this machine.
+
+    The system path is preferred so root-owned watchdogs can read the intent;
+    a per-user path is used when the system directory is absent or read-only
+    (install without root).
+    """
+    directory = os.path.dirname(PIN_FILE)
+    if os.path.isfile(PIN_FILE):
+        return PIN_FILE
+    if directory and os.path.isdir(directory) and os.access(directory, os.W_OK):
+        return PIN_FILE
+    return USER_PIN_FILE
 
 
-def _ensure_desktop_entry():
-    if os.path.isfile(APP_DESKTOP_PATH):
-        return
-    os.makedirs(os.path.dirname(APP_DESKTOP_PATH), exist_ok=True)
-    with open(APP_DESKTOP_PATH, "w") as f:
-        f.write(APP_DESKTOP_ENTRY)
+def pin_files() -> list[str]:
+    """Every location consulted for the pin, most authoritative first."""
+    files = [PIN_FILE]
+    if USER_PIN_FILE != PIN_FILE:
+        files.append(USER_PIN_FILE)
+    return files
 
 
-def _read_cpu_governor() -> str:
-    try:
-        with open(CPU_GOVERNOR_PATH) as f:
-            return f.read().strip()
-    except (FileNotFoundError, OSError):
-        return "N/A"
-
-
-def _read_power_profile_db() -> Optional[str]:
-    try:
-        bus = QtDBus.QDBusConnection.systemBus()
-        iface = QtDBus.QDBusInterface(PP_SERVICE, PP_PATH, PP_PROPS, bus)
-        reply = iface.call("Get", PP_IFACE, "ActiveProfile")
-        if reply.arguments():
-            val = reply.arguments()[0]
-            return str(val).strip("\"'")
-    except Exception:
-        pass
+def read_pin(path: str | None = None) -> str | None:
+    """Governor the user pinned against automatic tuning, if any."""
+    if path is not None:
+        value = _read_text(path)
+        return value or None
+    for candidate in pin_files():
+        value = _read_text(candidate)
+        if value:
+            return value
     return None
-def _windscribe_traffic() -> tuple[Optional[float], Optional[str]]:
-    """Fetch Windscribe remaining traffic (MB) and account name."""
+
+
+def write_pin(
+    governor: str | None,
+    path: str | None = None,
+    available_path: str = AVAILABLE_GOVERNORS_PATH,
+) -> tuple[bool, str]:
+    """Persist (or clear) the governor pin. Returns (ok, message)."""
+    target = path or active_pin_file()
+    if governor is None:
+        candidates = [target] if path is not None else pin_files()
+        removed = False
+        for candidate in candidates:
+            try:
+                os.remove(candidate)
+                removed = True
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                return False, f"cannot remove {candidate}: {exc}"
+        return (True, "pin cleared") if removed else (True, "no pin to clear")
+
+    if governor not in available_governors(available_path):
+        return False, f"governor {governor!r} is not available"
+
+    try:
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write(governor + "\n")
+    except OSError as exc:
+        return False, f"cannot write {target}: {exc}"
+    return True, f"pin set to {governor} ({target})"
+
+
+def apply_governor(
+    governor: str,
+    governor_path: str = GOVERNOR_PATH,
+    available_path: str = AVAILABLE_GOVERNORS_PATH,
+) -> tuple[bool, str]:
+    """Set the cpufreq governor, preferring the passwordless cpupower call."""
+    if governor not in available_governors(available_path):
+        return False, f"governor {governor!r} is not available"
+    if read_governor(governor_path) == governor:
+        return True, "already active"
+
+    attempts = (
+        ["sudo", "-n", "cpupower", "frequency-set", "-g", governor],
+    )
+    last_error = ""
+    for cmd in attempts:
+        if shutil.which(cmd[0]) is None:
+            last_error = f"{cmd[0]} not found"
+            continue
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=15, check=False
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            last_error = str(exc)
+            continue
+        if result.returncode == 0 and read_governor(governor_path) == governor:
+            return True, f"governor set to {governor}"
+        last_error = (result.stderr or result.stdout).strip() or (
+            f"exit code {result.returncode}"
+        )
+
+    # Direct sysfs write works when the user owns the cpufreq files.
+    try:
+        with open(governor_path, "w", encoding="utf-8") as handle:
+            handle.write(governor)
+    except OSError as exc:
+        return False, last_error or f"cannot write {governor_path}: {exc}"
+    if read_governor(governor_path) == governor:
+        return True, f"governor set to {governor} (sysfs)"
+    return False, last_error or "governor did not change"
+
+
+def read_power_profile() -> str | None:
+    """Active KDE Power Profile via gdbus (no Qt, hence CLI friendly)."""
+    if shutil.which("gdbus") is None:
+        return None
     try:
         result = subprocess.run(
-            ["/usr/bin/windscribe-cli", "status"],
-            capture_output=True, text=True, timeout=8,
+            [
+                "gdbus", "call", "--system",
+                "--dest", PP_SERVICE,
+                "--object-path", PP_PATH,
+                "--method", "org.freedesktop.DBus.Properties.Get",
+                PP_IFACE, "ActiveProfile",
+            ],
+            capture_output=True, text=True, timeout=5, check=False,
         )
-        if result.returncode != 0:
-            return None, None
-
-        # Parse traffic: "Использование данных: 8,65 ГБ / 10,00 ГБ"
-        remaining = None
-        for line in result.stdout.split('\n'):
-            if '\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435 \u0434\u0430\u043d\u043d\u044b\u0445' in line:
-                import re
-                m = re.search(r'([\d.,]+)\s*\S+\s*/\s*([\d.,]+)\s*(\S+)', line)
-                if m:
-                    total_val = float(m.group(2).replace(',', '.'))
-                    used_val = float(m.group(1).replace(',', '.'))
-                    total_unit = m.group(3).replace('\u0411', '').upper()
-                    remaining = _to_mb(total_val, total_unit) - _to_mb(used_val, total_unit)
-                    remaining = max(0, remaining)
-                    break
-
-        # Account from state file
-        account = None
-        current_file = os.path.expanduser("~/.config/windscribe/current")
-        if os.path.isfile(current_file):
-            account = open(current_file).read().strip() or None
-
-        return remaining, account
-    except Exception:
-        return None, None
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    raw = result.stdout.strip()
+    if not raw.startswith("("):
+        return None
+    inner = raw[1:raw.rindex(")")] if raw.endswith(")") else raw[1:]
+    value = inner.strip().rstrip(",").strip().strip("<>'\"")
+    return value or None
 
 
-def _to_mb(value: float, unit: str) -> float:
-    """Convert value to MB. Unit: G=ГБ, M=МБ, K=КБ."""
-    u = unit.upper()
-    if u in ('G', '\u0413'):
-        return value * 1000
-    if u in ('M', '\u041c'):
-        return value
-    if u in ('K', '\u041a'):
-        return value / 1000
-    return value
+def set_power_profile(profile: str) -> tuple[bool, str]:
+    """Switch the KDE Power Profile via gdbus."""
+    if profile not in PROFILE_MAP:
+        return False, f"unknown profile {profile!r}"
+    if shutil.which("gdbus") is None:
+        return False, "gdbus not found"
+    try:
+        result = subprocess.run(
+            [
+                "gdbus", "call", "--system",
+                "--dest", PP_SERVICE,
+                "--object-path", PP_PATH,
+                "--method", "org.freedesktop.DBus.Properties.Set",
+                PP_IFACE, "ActiveProfile",
+                f"<'{profile}'>",
+            ],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    if result.returncode != 0:
+        return False, (result.stderr or result.stdout).strip()
+    return True, f"profile set to {profile}"
 
 
+# ── configuration file ────────────────────────────────────
 
-# ── power monitor (rolling 1-min average) ─────────────────
+DEFAULT_CONFIG = {"pstate": PSTATE_AUTO, "autostart": True, "governor": None}
+
+
+def load_config(path: str = CONFIG_FILE) -> dict:
+    cfg = dict(DEFAULT_CONFIG)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            stored = json.load(handle)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return cfg
+    if isinstance(stored, dict):
+        cfg.update({k: v for k, v in stored.items() if k in DEFAULT_CONFIG})
+    return cfg
+
+
+def save_config(cfg: dict, path: str = CONFIG_FILE) -> None:
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(cfg, handle)
+
+
+# ── autostart / desktop entry ─────────────────────────────
+
+def _desktop_entry(exec_path: str, autostart: bool) -> str:
+    lines = [
+        "[Desktop Entry]",
+        "Type=Application",
+        "Name=NVIDIA P-State Switcher",
+        "Comment=GPU P-state, CPU governor, Power Profiles, Power monitor",
+        f"Exec={exec_path}",
+        "Icon=nvidia-pstate-switcher",
+        "Categories=System;Hardware;",
+        "Terminal=false",
+        "StartupNotify=false",
+    ]
+    if autostart:
+        lines.append("X-KDE-autostart-condition=true")
+    return "\n".join(lines) + "\n"
+
+
+def _exec_path() -> str:
+    """Absolute path used in generated .desktop entries."""
+    argv0 = sys.argv[0] if sys.argv else ""
+    if argv0 and os.sep in argv0:
+        return os.path.abspath(argv0)
+    if argv0:
+        found = shutil.which(argv0)
+        if found:
+            return os.path.abspath(found)
+    found = shutil.which("nvidia-pstate-switcher")
+    return os.path.abspath(found) if found else "nvidia-pstate-switcher"
+
+
+def autostart_enabled(path: str = AUTOSTART_FILE) -> bool:
+    return os.path.isfile(path)
+
+
+def set_autostart(enabled: bool, path: str = AUTOSTART_FILE) -> None:
+    if enabled:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(_desktop_entry(_exec_path(), autostart=True))
+        return
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(path)
+
+
+def ensure_desktop_entry(path: str = DESKTOP_FILE) -> None:
+    if os.path.isfile(path):
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(_desktop_entry(_exec_path(), autostart=False))
+
+
+# ── nvidia-smi / RAPL parsing ─────────────────────────────
+
+def parse_smi(raw: str) -> tuple[float, str, int]:
+    """Parse `nvidia-smi --query-gpu=index,power.draw,pstate`.
+
+    Returns (total power in W, P-state of the first GPU, GPU count).
+    Power is summed over all GPUs; consumers that only want one GPU keep the
+    first line. Malformed or `[N/A]` fields degrade to 0.0 / "—".
+    """
+    total = 0.0
+    pstate = "—"
+    count = 0
+    for line in raw.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 3:
+            continue
+        count += 1
+        if count == 1:
+            pstate = parts[2] or "—"
+        try:
+            total += float(parts[1])
+        except ValueError:
+            continue
+    return total, pstate, count
+
+
+def read_rapl_counters(
+    pkg_path: str = RAPL_PKG_PATH, dram_path: str = RAPL_DRAM_PATH
+) -> tuple[int, int] | None:
+    pkg = _read_text(pkg_path)
+    dram = _read_text(dram_path)
+    if pkg is None or dram is None:
+        return None
+    try:
+        return int(pkg), int(dram)
+    except ValueError:
+        return None
+
+
+def rapl_watts(previous: int, current: int, interval: float) -> float:
+    """Convert a RAPL microjoule delta into watts."""
+    if interval <= 0:
+        return 0.0
+    return (current - previous) / 1_000_000 / interval
+
+
+# ── power monitor (rolling 1-minute average) ──────────────
 
 class PowerMonitor:
     """Tracks GPU / CPU package / DRAM power with a rolling average."""
 
-    def __init__(self, window: int = POWER_HISTORY_SECONDS, interval: float = 2.0):
+    def __init__(
+        self,
+        window: int = POWER_HISTORY_SECONDS,
+        interval: float = REFRESH_INTERVAL_SECONDS,
+    ):
         size = max(1, int(window / interval))
-        self._window = size
         self._interval = interval
         self.gpu_now = 0.0
+        self.gpu_count = 0
         self.gpu: deque[float] = deque(maxlen=size)
         self.pkg: deque[float] = deque(maxlen=size)
         self.dram: deque[float] = deque(maxlen=size)
+        self._last: tuple[int, int] | None = None
 
-        self._last_pkg_uj: Optional[int] = None
-        self._last_dram_uj: Optional[int] = None
-
-    def add_gpu_sample(self, watts: float):
+    def add_gpu_sample(self, watts: float, count: int = 1) -> None:
         self.gpu_now = watts
+        self.gpu_count = count
         self.gpu.append(watts)
 
-    def add_rapl_samples(self, pkg_uj: int, dram_uj: int):
-        if self._last_pkg_uj is not None and self._last_dram_uj is not None:
-            dt = self._interval
-            # microjoules → watts
-            pkg_w = (pkg_uj - self._last_pkg_uj) / 1_000_000 / dt
-            dram_w = (dram_uj - self._last_dram_uj) / 1_000_000 / dt
-            # Clamp and sanity check (avoid counter wrap or outlier)
+    def add_rapl_samples(self, pkg_uj: int, dram_uj: int) -> None:
+        if self._last is None:
+            pkg_w = dram_w = 0.0
+        else:
+            pkg_w = rapl_watts(self._last[0], pkg_uj, self._interval)
+            dram_w = rapl_watts(self._last[1], dram_uj, self._interval)
+            # Counter wrap-around yields a negative delta: treat as zero.
             pkg_w = max(0.0, min(pkg_w, 300.0))
             dram_w = max(0.0, min(dram_w, 50.0))
-        else:
-            pkg_w = 0.0
-            dram_w = 0.0
-
-        self._last_pkg_uj = pkg_uj
-        self._last_dram_uj = dram_uj
+        self._last = (pkg_uj, dram_uj)
         self.pkg.append(pkg_w)
         self.dram.append(dram_w)
 
@@ -262,421 +484,581 @@ class PowerMonitor:
 
     @property
     def total_now(self) -> float:
-        return self.gpu_now + (self.pkg[-1] if self.pkg else 0) \
-               + (self.dram[-1] if self.dram else 0)
+        return (
+            self.gpu_now
+            + (self.pkg[-1] if self.pkg else 0.0)
+            + (self.dram[-1] if self.dram else 0.0)
+        )
 
     @property
     def total_avg(self) -> float:
         return self.gpu_avg + self.pkg_avg + self.dram_avg
 
-    def summary(self) -> str:
-        """Multi-line summary for tooltip."""
-        pkg_w = f"{self.pkg[-1]:.1f}" if self.pkg else "?"
-        dram_w = f"{self.dram[-1]:.1f}" if self.dram else "?"
-        lines = [
-            f"GPU:   {self.gpu_now:.1f} W  |  avg {self.gpu_avg:.1f} W",
-            f"PKG:   {pkg_w} W  |  avg {self.pkg_avg:.1f} W",
-            f"DRAM:  {dram_w} W  |  avg {self.dram_avg:.1f} W",
-            f"TOTAL: {self.total_now:.1f} W  |  avg {self.total_avg:.1f} W",
-        ]
-        return "\n".join(lines)
+    def as_dict(self) -> dict:
+        return {
+            "gpu_now": round(self.gpu_now, 2),
+            "gpu_avg": round(self.gpu_avg, 2),
+            "pkg_now": round(self.pkg[-1], 2) if self.pkg else None,
+            "pkg_avg": round(self.pkg_avg, 2),
+            "dram_now": round(self.dram[-1], 2) if self.dram else None,
+            "dram_avg": round(self.dram_avg, 2),
+            "total_now": round(self.total_now, 2),
+            "total_avg": round(self.total_avg, 2),
+        }
 
 
-# ── icon cache ────────────────────────────────────────────
+# ── state dump (no Qt required) ───────────────────────────
 
-_icon_cache: dict[str, QtGui.QIcon] = {}
-
-
-def _render_icon(label: str, size: int = 48) -> QtGui.QIcon:
-    if label in _icon_cache:
-        return _icon_cache[label]
-
-    pm = QtGui.QPixmap(size, size)
-    pm.fill(QtCore.Qt.GlobalColor.transparent)
-
-    p = QtGui.QPainter(pm)
-    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-    p.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing)
-
-    font = QtGui.QFont("sans-serif", size // 2, QtGui.QFont.Weight.Bold)
-    path = QtGui.QPainterPath()
-    path.addText(0, 0, font, label)
-
-    bounds = path.boundingRect()
-    tx = (size - bounds.width()) / 2 - bounds.x()
-    ty = (size - bounds.height()) / 2 - bounds.y()
-    path.translate(tx, ty)
-
-    p.setPen(QtGui.QPen(QtGui.QColor("white"), 2))
-    p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-    p.drawPath(path)
-
-    p.setBrush(QtGui.QColor("white"))
-    p.setPen(QtCore.Qt.PenStyle.NoPen)
-    p.drawPath(path)
-
-    p.end()
-
-    icon = QtGui.QIcon(pm)
-    _icon_cache[label] = icon
-    return icon
+def _binary(name: str) -> str | None:
+    return shutil.which(name) or (
+        os.path.expanduser(f"~/.local/bin/{name}")
+        if os.access(os.path.expanduser(f"~/.local/bin/{name}"), os.X_OK)
+        else None
+    )
 
 
-# ── runner: async QProcess wrapper ────────────────────────
+def collect_state() -> dict:
+    """Full machine-facing snapshot: used by `--dump-state` and by tests."""
+    cfg = load_config()
+    gpu_power, gpu_pstate, gpu_count = 0.0, "—", 0
+    smi = _binary("nvidia-smi")
+    if smi:
+        try:
+            result = subprocess.run(
+                [
+                    smi, "--query-gpu=index,power.draw,pstate",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            if result.returncode == 0:
+                gpu_power, gpu_pstate, gpu_count = parse_smi(result.stdout)
+        except (OSError, subprocess.SubprocessError):
+            pass
 
-class CommandRunner(QtCore.QObject):
-    finished = QtCore.pyqtSignal(str)
-    failed = QtCore.pyqtSignal(str)
+    rapl = read_rapl_counters()
+    return {
+        "version": __version__,
+        "governor": read_governor(),
+        "available_governors": available_governors(),
+        "governor_pin": read_pin(),
+        "pin_file": active_pin_file(),
+        "pin_files": pin_files(),
+        "pin_writable": os.access(
+            os.path.dirname(active_pin_file()) or "/", os.W_OK
+        ),
+        "power_profile": read_power_profile(),
+        "config": cfg,
+        "gpu": {
+            "count": gpu_count,
+            "pstate": gpu_pstate,
+            "power_w": round(gpu_power, 2),
+        },
+        "rapl_readable": rapl is not None,
+        "dependencies": {
+            "nvidia-smi": smi,
+            "nvidia-pstate": _binary("nvidia-pstate"),
+            "cpupower": _binary("cpupower"),
+            "gdbus": _binary("gdbus"),
+            "PyQt6": _pyqt_available(),
+        },
+    }
 
-    def run(self, cmd: list[str]):
-        self._proc = QtCore.QProcess(self)
-        self._proc.setProgram(cmd[0])
-        self._proc.setArguments(cmd[1:])
-        self._proc.setProcessChannelMode(
-            QtCore.QProcess.ProcessChannelMode.MergedChannels
-        )
-        self._proc.finished.connect(self._on_done)
-        self._proc.errorOccurred.connect(self._on_error)
-        self._proc.start()
 
-    def _on_done(self, exit_code: int):
-        out = self._proc.readAllStandardOutput().data().decode().strip()
-        if exit_code == 0:
-            self.finished.emit(out)
-        else:
-            self.failed.emit(out or f"exit code {exit_code}")
-
-    def _on_error(self, err):
-        self.failed.emit(f"cannot launch: {self._proc.program()} ({err.name})")
+def _pyqt_available() -> bool:
+    try:
+        import PyQt6  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
-# ── tray app ──────────────────────────────────────────────
+# ── Qt layer ──────────────────────────────────────────────
+# Imported lazily: CLI paths and tests must work without GUI libraries.
 
-class PStateSwitcher(QtWidgets.QSystemTrayIcon):
+try:
+    from PyQt6 import QtCore, QtGui, QtNetwork, QtWidgets
 
-    _current_label = "\u2014"
-    _current_profile: Optional[str] = None
-    _current_governor = "N/A"
+    HAVE_QT = True
+except ImportError:  # pragma: no cover - exercised only on Qt-less boxes
+    QtCore = QtGui = QtNetwork = QtWidgets = None  # type: ignore[assignment]
+    HAVE_QT = False
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
 
-        self._cfg = _load_config()
-        self._nvidia_pstate_bin = _resolve_bin("nvidia-pstate")
-        self._nvidia_smi_bin = _resolve_bin("nvidia-smi")
-        self._rapl_read_bin = _resolve_bin("power-rapl-read.sh")
-        _ensure_desktop_entry()
+if HAVE_QT:
 
-        custom = self._cfg.get("pstates")
-        self._pstates = (
-            {p: DEFAULT_PSTATES.get(p, "") for p in custom}
-            if custom
-            else dict(DEFAULT_PSTATES)
-        )
+    _icon_cache: dict[str, QtGui.QIcon] = {}
 
-        # Power monitor (rolling 1-min average)
-        self._power = PowerMonitor()
 
-        # ── Runners ──
-        self._smi_runner = CommandRunner()
-        self._smi_runner.finished.connect(self._on_smi_ok)
-        self._smi_runner.failed.connect(lambda _: None)
+    def _render_icon(label: str, size: int = 48):
+        """Draw the P-state label onto a transparent pixmap."""
+        if label in _icon_cache:
+            return _icon_cache[label]
 
-        self._pstate_setter = CommandRunner()
-        self._pstate_setter.finished.connect(lambda _: self._refresh_later())
-        self._pstate_setter.failed.connect(self._on_setter_fail)
+        pixmap = QtGui.QPixmap(size, size)
+        pixmap.fill(QtCore.Qt.GlobalColor.transparent)
 
-        self._gov_setter = CommandRunner()
-        self._gov_setter.finished.connect(lambda _: self._refresh_later())
-        self._gov_setter.failed.connect(
-            lambda m: self.showMessage("CPU Governor", f"Failed:\n{m}",
-                                       QtWidgets.QSystemTrayIcon.MessageIcon.Warning, 3000)
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing)
+
+        font = QtGui.QFont("sans-serif", size // 2, QtGui.QFont.Weight.Bold)
+        path = QtGui.QPainterPath()
+        path.addText(0, 0, font, label)
+
+        bounds = path.boundingRect()
+        path.translate(
+            (size - bounds.width()) / 2 - bounds.x(),
+            (size - bounds.height()) / 2 - bounds.y(),
         )
 
-        self._rapl_runner = CommandRunner()
-        self._rapl_runner.finished.connect(self._on_rapl_ok)
-        self._rapl_runner.failed.connect(lambda _: None)
+        painter.setPen(QtGui.QPen(QtGui.QColor("white"), 2))
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(QtGui.QColor("white"))
+        painter.drawPath(path)
+        painter.end()
 
-        # ── Tray setup ──
-        self.setIcon(_render_icon("\u2014"))
-        self.setToolTip("System Tuning Tray\n(right-click for menu)")
+        icon = QtGui.QIcon(pixmap)
+        _icon_cache[label] = icon
+        return icon
 
-        self.monitor_timer = QtCore.QTimer(self)
-        self.monitor_timer.timeout.connect(self._refresh)
-        self.monitor_timer.start(2000)
 
-        # Read initial states
-        self._current_governor = _read_cpu_governor()
-        self._current_profile = _read_power_profile_db()
+    class CommandRunner(QtCore.QObject):
+        """Async QProcess wrapper: never blocks the tray's UI thread."""
 
-        self._build_menu()
+        finished = QtCore.pyqtSignal(str)
+        failed = QtCore.pyqtSignal(str)
 
-        saved_pstate = self._cfg.get("pstate", "16")
-        self._mark_active_pstate(saved_pstate)
-        if saved_pstate != "16":
-            self._run_pstate_setter(saved_pstate)
+        def run(self, cmd: list[str]) -> None:
+            self._proc = QtCore.QProcess(self)
+            self._proc.setProgram(cmd[0])
+            self._proc.setArguments(cmd[1:])
+            self._proc.setProcessChannelMode(
+                QtCore.QProcess.ProcessChannelMode.MergedChannels
+            )
+            self._proc.finished.connect(self._on_done)
+            self._proc.errorOccurred.connect(self._on_error)
+            self._proc.start()
 
-        # DBus listener for KDE Power Profiles
-        self._connect_power_profiles()
+        def _on_done(self, exit_code: int) -> None:
+            output = self._proc.readAllStandardOutput().data().decode().strip()
+            if exit_code == 0:
+                self.finished.emit(output)
+            else:
+                self.failed.emit(output or f"exit code {exit_code}")
 
-        # First refresh
-        self._refresh()
+        def _on_error(self, err) -> None:
+            self.failed.emit(f"cannot launch {self._proc.program()} ({err.name})")
 
-        # ── IPC ──
-        self._ipc_server = QtNetwork.QLocalServer(self)
-        self._ipc_server.setSocketOptions(
-            QtNetwork.QLocalServer.SocketOption.WorldAccessOption
-        )
-        QtNetwork.QLocalServer.removeServer(IPC_SERVER)
-        if not self._ipc_server.listen(IPC_SERVER):
-            print("IPC server failed to listen", file=sys.stderr)
-        self._ipc_server.newConnection.connect(self._on_ipc_connection)
 
-        self.activated.connect(self._on_activate)
-        self.show()
+    class TrayApp(QtWidgets.QSystemTrayIcon):
+        """Tray icon with power-profile, governor, P-state and power sections."""
 
-    # ── public API ────────────────────────────────────────
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self._cfg = load_config()
+            self._pin = read_pin()
+            self._last_pin_apply = 0.0
+            self._current_label = "—"
+            self._power = PowerMonitor()
+            self._pstates = dict(DEFAULT_PSTATES)
 
-    def set_state(self, ps_id: str) -> None:
-        """Manually set GPU P-state from menu."""
-        self._cfg["pstate"] = ps_id
-        _save_config(self._cfg)
-        self._mark_active_pstate(ps_id)
-        self._run_pstate_setter(ps_id)
+            ensure_desktop_entry()
 
-    def set_power_profile(self, profile: str) -> None:
-        """Set KDE Power Profile via DBus (two-way sync)."""
-        bus = QtDBus.QDBusConnection.systemBus()
-        iface = QtDBus.QDBusInterface(PP_SERVICE, PP_PATH, PP_PROPS, bus)
-        iface.call("Set", PP_IFACE, "ActiveProfile",
-                   QtCore.QVariant(profile))
+            self._smi_bin = _binary("nvidia-smi") or "nvidia-smi"
+            self._pstate_bin = _binary("nvidia-pstate") or "nvidia-pstate"
 
-    def set_cpu_governor(self, governor: str) -> None:
-        """Set CPU governor directly."""
-        self._gov_setter.run(["sudo", "cpupower", "frequency-set", "-g", governor])
+            self._smi_runner = CommandRunner()
+            self._smi_runner.finished.connect(self._on_smi_ok)
 
-    # ── DBus Power Profiles ──────────────────────────────
+            self._pstate_runner = CommandRunner()
+            self._pstate_runner.finished.connect(lambda _: self._refresh())
+            self._pstate_runner.failed.connect(self._on_pstate_failure)
 
-    def _connect_power_profiles(self):
-        # Polling for profile changes in _refresh() instead of DBus signal
-        # (QVariantMap type not registered in PyQt6/QtDBus)
-        pass
+            self._build_menu()
 
-    def _apply_profile(self, profile: str) -> None:
-        self._current_profile = profile
-        settings = PROFILE_MAP.get(profile)
-        if settings is None:
-            self._refresh_later()
-            return
+            saved = self._cfg.get("pstate", PSTATE_AUTO)
+            self._mark_active_pstate(str(saved))
+            if str(saved) != PSTATE_AUTO:
+                self._set_pstate(str(saved))
 
-        self._cfg["pstate"] = settings["pstate"]
-        _save_config(self._cfg)
-        self._mark_active_pstate(settings["pstate"])
-        self._run_pstate_setter(settings["pstate"])
-        self._gov_setter.run(
-            ["sudo", "cpupower", "frequency-set", "-g", settings["governor"]]
-        )
+            self._timer = QtCore.QTimer(self)
+            self._timer.timeout.connect(self._refresh)
+            self._timer.start(int(REFRESH_INTERVAL_SECONDS * 1000))
 
-    # ── menu ──────────────────────────────────────────────
+            self._ipc = QtNetwork.QLocalServer(self)
+            QtNetwork.QLocalServer.removeServer(IPC_SOCKET)
+            if not self._ipc.listen(IPC_SOCKET):
+                print(f"IPC listen failed on {IPC_SOCKET}", file=sys.stderr)
+            self._ipc.newConnection.connect(self._on_ipc_connection)
 
-    def _build_menu(self):
-        self._menu = QtWidgets.QMenu()
-        self._ps_actions = []
-        self._gov_actions = []
-        self._profile_actions = []
-
-        # ── Power Profile section ──
-        header = self._menu.addAction("Power Profile")
-        header.setEnabled(False)
-        self._make_bold(header)
-
-        self._profile_actions = []
-        for pid, plabel in PROFILE_LABELS.items():
-            a = self._menu.addAction(plabel)
-            a.setData(("profile", pid))
-            a.setCheckable(True)
-            self._profile_actions.append(a)
-
-        self._menu.addSeparator()
-
-        # ── CPU Governor section ──
-        header = self._menu.addAction("CPU Governor")
-        header.setEnabled(False)
-        self._make_bold(header)
-
-        for gov, glabel in GOVERNOR_LABELS.items():
-            a = self._menu.addAction(glabel)
-            a.setData(("governor", gov))
-            a.setCheckable(True)
-            self._gov_actions.append(a)
-
-        self._menu.addSeparator()
-
-        # ── GPU P-state section ──
-        header = self._menu.addAction("GPU P-State")
-        header.setEnabled(False)
-        self._make_bold(header)
-
-        for ps_id, label in self._pstates.items():
-            text = f"P{ps_id} \u2014 {label}" if label else f"P{ps_id}"
-            action = self._menu.addAction(text)
-            action.setData(("pstate", ps_id))
-            action.setCheckable(True)
-            self._ps_actions.append(action)
-
-        self._menu.addSeparator()
-
-        auto_action = self._menu.addAction("Auto (driver control)")
-        auto_action.setData(("pstate", "16"))
-        auto_action.setCheckable(True)
-        self._ps_actions.append(auto_action)
-
-        self._menu.addSeparator()
-
-        # ── Status info (read-only) ──
-        self._info_gov = self._menu.addAction(f"CPU: {self._current_governor}")
-        self._info_gov.setEnabled(False)
-        self._info_profile = self._menu.addAction(
-            f"Profile: {self._current_profile or 'N/A'}"
-        )
-        self._info_profile.setEnabled(False)
-
-        # ── Power meter section ──
-        self._menu.addSeparator()
-        header = self._menu.addAction("Power (now / 1min avg)")
-        header.setEnabled(False)
-        self._make_bold(header)
-
-        self._info_power_gpu = self._menu.addAction("GPU: -- W")
-        self._info_power_gpu.setEnabled(False)
-        self._info_power_pkg = self._menu.addAction("PKG: -- W")
-        self._info_power_pkg.setEnabled(False)
-        self._info_power_dram = self._menu.addAction("DRAM: -- W")
-        self._info_power_dram.setEnabled(False)
-        self._info_power_total = self._menu.addAction("TOTAL: -- W")
-        self._info_power_total.setEnabled(False)
-
-        # ── Windscribe VPN ──
-        self._menu.addSeparator()
-        header = self._menu.addAction("Windscribe VPN")
-        header.setEnabled(False)
-        self._make_bold(header)
-
-        self._info_windscribe = self._menu.addAction("VPN: -- GB")
-        self._info_windscribe.setEnabled(False)
-
-        self._menu.addSeparator()
-
-        # ── Settings ──
-        as_action = self._menu.addAction("Run at startup")
-        as_action.setCheckable(True)
-        as_action.setChecked(_autostart_enabled())
-        as_action.triggered.connect(self._toggle_autostart)
-
-        self._menu.addSeparator()
-        self._menu.addAction("Refresh", self._refresh)
-        self._menu.addAction("Quit", QtWidgets.QApplication.quit)
-
-        self._menu.triggered.connect(self._on_menu_trigger)
-        self.setContextMenu(self._menu)
-
-    @staticmethod
-    def _make_bold(action: QtGui.QAction):
-        f = action.font()
-        f.setBold(True)
-        action.setFont(f)
-
-    def _mark_active_pstate(self, active_ps: str) -> None:
-        raw = active_ps.replace("P", "")
-        for a in self._ps_actions:
-            a.setChecked(a.data()[1] == raw)
-
-    def _mark_active_governor(self, gov: str) -> None:
-        for a in self._gov_actions:
-            a.setChecked(a.data()[1] == gov)
-
-    def _mark_active_profile(self, profile: str) -> None:
-        for a in self._profile_actions:
-            a.setChecked(a.data()[1] == profile)
-
-    def _toggle_autostart(self, checked: bool) -> None:
-        _set_autostart(checked)
-        self._cfg["autostart"] = checked
-        _save_config(self._cfg)
-
-    def _on_menu_trigger(self, action: QtGui.QAction):
-        data = action.data()
-        if not isinstance(data, tuple) or len(data) != 2:
-            return
-        kind, value = data
-
-        if kind == "profile":
-            self.set_power_profile(value)
-            # Profile change will be picked up by DBus listener
-        elif kind == "governor":
-            self.set_cpu_governor(value)
-        elif kind == "pstate":
-            self.set_state(value)
-
-    def _on_ipc_connection(self):
-        conn = self._ipc_server.nextPendingConnection()
-        if conn and conn.waitForReadyRead(2000):
-            if conn.readAll().data() == b"show_menu":
-                self.showMessage(
-                    "System Tuning Tray",
-                    "Already running \u2014 check the system tray.",
-                    QtWidgets.QSystemTrayIcon.MessageIcon.Information, 3000)
-        if conn:
-            conn.close()
-
-    def _on_activate(self, reason):
-        if reason == QtWidgets.QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.activated.connect(self._on_activate)
+            self.setIcon(_render_icon("—"))
+            self.setToolTip("NVIDIA P-State Switcher")
+            self.show()
             self._refresh()
 
-    # ── async refresh (every 2s) ──────────────────────────
+        # ── menu ──────────────────────────────────────────────
 
-    def _run_pstate_setter(self, ps_id: str) -> None:
-        self._pstate_setter.run([self._nvidia_pstate_bin, "-ps", ps_id])
+        def _build_menu(self) -> None:
+            self._menu = QtWidgets.QMenu()
+            self._profile_actions = []
+            self._governor_actions = []
+            self._pstate_actions = []
 
-    def _refresh_later(self):
-        """Schedule a refresh on the next timer tick (debounce)."""
-        QtCore.QTimer.singleShot(100, self._refresh)
+            self._section("Power Profile")
+            for profile_id, label in PROFILE_LABELS.items():
+                action = self._menu.addAction(label)
+                action.setData(("profile", profile_id))
+                action.setCheckable(True)
+                self._profile_actions.append(action)
 
-    def _refresh(self):
-        """Fetch all metrics in parallel."""
-        # GPU stats
-        self._smi_runner.run([
-            self._nvidia_smi_bin, "--query-gpu=index,power.draw,pstate",
-            "--format=csv,noheader,nounits",
-        ])
-        # RAPL energy counters
-        self._rapl_runner.run(["sudo", "/usr/local/bin/power-rapl-read.sh"])
-        # CPU governor + profile (fast local reads)
-        self._current_governor = _read_cpu_governor()
-        new_profile = _read_power_profile_db()
-        if new_profile and new_profile != self._current_profile:
-            self._current_profile = new_profile
-            self._apply_profile(new_profile)
+            self._menu.addSeparator()
+            self._section("CPU Governor")
+            for governor in available_governors():
+                action = self._menu.addAction(governor)
+                action.setData(("governor", governor))
+                action.setCheckable(True)
+                self._governor_actions.append(action)
+            unpin = self._menu.addAction("Follow system (unpin)")
+            unpin.setData(("unpin", None))
 
-    # ── GPU result handler ────────────────────────────────
+            self._menu.addSeparator()
+            self._section("GPU P-State")
+            for pstate, label in self._pstates.items():
+                text = f"P{pstate} — {label}" if label else f"P{pstate}"
+                action = self._menu.addAction(text)
+                action.setData(("pstate", pstate))
+                action.setCheckable(True)
+                self._pstate_actions.append(action)
 
-    def _on_smi_ok(self, raw: str):
-        parts = [p.strip() for p in raw.split(",")]
-        if len(parts) < 3:
-            return
-        _idx, power, pstate = parts
-        try:
-            gpu_w = float(power)
-        except ValueError:
-            gpu_w = 0.0
+            self._menu.addSeparator()
+            self._section("Status")
+            self._info_governor = self._info_item("CPU: —")
+            self._info_pin = self._info_item("Pin: —")
+            self._info_profile = self._info_item("Profile: —")
+            self._info_gpu = self._info_item("GPU: — / —")
+            self._info_pkg = self._info_item("PKG: —")
+            self._info_dram = self._info_item("DRAM: —")
+            self._info_total = self._info_item("TOTAL: —")
 
-        self._power.add_gpu_sample(gpu_w)
+            self._menu.addSeparator()
+            autostart = self._menu.addAction("Run at startup")
+            autostart.setCheckable(True)
+            autostart.setChecked(autostart_enabled())
+            autostart.triggered.connect(self._toggle_autostart)
 
-        # Update icon if P-state changed
-        if pstate != self._current_label:
-            self._current_label = pstate
-            self.setIcon(_render_icon(pstate))
+            self._menu.addSeparator()
+            self._menu.addAction("Refresh", self._refresh)
+            self._menu.addAction("Quit", QtWidgets.QApplication.quit)
 
-        self._update_display()
+            self._menu.triggered.connect(self._on_menu_trigger)
+            self.setContextMenu(self._menu)
 
-    # ── RAPL result handler ───────────────────────────────    # ── Windscribe result handler ──────────────────────────
+        def _section(self, title: str) -> None:
+            header = self._menu.addAction(title)
+            header.setEnabled(False)
+            font = header.font()
+            font.setBold(True)
+            header.setFont(font)
+
+        def _info_item(self, text: str):
+            action = self._menu.addAction(text)
+            action.setEnabled(False)
+            return action
+
+        # ── actions ───────────────────────────────────────────
+
+        def _on_menu_trigger(self, action) -> None:
+            data = action.data()
+            if not isinstance(data, tuple):
+                return
+            kind, value = data
+            if kind == "profile":
+                ok, message = set_power_profile(value)
+                self._notify("Power Profile", message, ok)
+            elif kind == "governor":
+                self._pin_governor(value)
+            elif kind == "unpin":
+                self._unpin_governor()
+            elif kind == "pstate":
+                self._set_pstate(value)
+
+        def _pin_governor(self, governor: str) -> None:
+            ok, message = apply_governor(governor)
+            if not ok:
+                self._notify("CPU Governor", message, False)
+                return
+            written, pin_message = write_pin(governor)
+            if written:
+                self._pin = governor
+            else:
+                # Pin file is not writable (missing root install). Enforce locally.
+                self._pin = governor
+                self._notify("CPU Governor", f"{pin_message}\nEnforcing from the tray.", True)
+            self._cfg["governor"] = governor
+            save_config(self._cfg)
+            self._current_governor = governor
+            self._update_display()
+
+        def _unpin_governor(self) -> None:
+            write_pin(None)
+            self._pin = None
+            self._cfg["governor"] = None
+            save_config(self._cfg)
+            self._update_display()
+
+        def _set_pstate(self, pstate: str) -> None:
+            self._cfg["pstate"] = pstate
+            save_config(self._cfg)
+            self._mark_active_pstate(pstate)
+            self._pstate_runner.run([self._pstate_bin, "-ps", pstate])
+
+        def _toggle_autostart(self, checked: bool) -> None:
+            set_autostart(checked)
+            self._cfg["autostart"] = checked
+            save_config(self._cfg)
+
+        def _notify(self, title: str, message: str, ok: bool = True) -> None:
+            icon = (
+                QtWidgets.QSystemTrayIcon.MessageIcon.Information
+                if ok
+                else QtWidgets.QSystemTrayIcon.MessageIcon.Warning
+            )
+            self.showMessage(title, message, icon, 4000)
+
+        def _on_pstate_failure(self, message: str) -> None:
+            self._notify("GPU P-State", f"Failed to set P-state:\n{message}", False)
+
+        # ── refresh loop ──────────────────────────────────────
+
+        def _refresh(self) -> None:
+            self._smi_runner.run([
+                self._smi_bin, "--query-gpu=index,power.draw,pstate",
+                "--format=csv,noheader,nounits",
+            ])
+            counters = read_rapl_counters()
+            if counters is not None:
+                self._power.add_rapl_samples(*counters)
+            self._current_governor = read_governor()
+            self._current_profile = read_power_profile()
+            self._enforce_pin()
+            self._update_display()
+
+        def _enforce_pin(self) -> None:
+            """Re-apply a pinned governor that external automation flipped back."""
+            pin = self._pin
+            if not pin or self._current_governor == pin:
+                return
+            if time.monotonic() - self._last_pin_apply < PIN_RETRY_SECONDS:
+                return
+            self._last_pin_apply = time.monotonic()
+            apply_governor(pin)
+            self._current_governor = read_governor()
+
+        def _on_smi_ok(self, raw: str) -> None:
+            power, pstate, count = parse_smi(raw)
+            self._power.add_gpu_sample(power, count)
+            if pstate != self._current_label:
+                self._current_label = pstate
+                self.setIcon(_render_icon(pstate))
+            self._update_display()
+
+        def _mark_active_pstate(self, active: str) -> None:
+            for action in self._pstate_actions:
+                action.setChecked(action.data()[1] == active)
+
+        def _update_display(self) -> None:
+            governor = self._current_governor or "N/A"
+            profile = self._current_profile or "N/A"
+            pin = self._pin or "—"
+
+            self._info_governor.setText(f"CPU: {governor}")
+            self._info_pin.setText(f"Pin: {pin}")
+            self._info_profile.setText(f"Profile: {profile}")
+            for action in self._governor_actions:
+                action.setChecked(action.data()[1] == governor)
+            for action in self._profile_actions:
+                action.setChecked(action.data()[1] == profile)
+
+            power = self._power
+            gpu_text = f"GPU: {power.gpu_now:.1f} W / avg {power.gpu_avg:.1f} W"
+            if power.gpu_count > 1:
+                gpu_text += f" ({power.gpu_count} GPUs)"
+            self._info_gpu.setText(gpu_text)
+            pkg_now = f"{power.pkg[-1]:.1f}" if power.pkg else "--"
+            dram_now = f"{power.dram[-1]:.1f}" if power.dram else "--"
+            self._info_pkg.setText(f"PKG: {pkg_now} W / avg {power.pkg_avg:.1f} W")
+            self._info_dram.setText(f"DRAM: {dram_now} W / avg {power.dram_avg:.1f} W")
+            self._info_total.setText(
+                f"TOTAL: {power.total_now:.1f} W / avg {power.total_avg:.1f} W"
+            )
+
+            self.setToolTip(
+                f"NVIDIA P-State Switcher {__version__}\n"
+                f"GPU P{self._current_label}  {power.gpu_now:.1f} W\n"
+                f"CPU {governor}   Pin: {pin}\n"
+                f"Profile {profile}\n"
+                f"PKG {pkg_now} W   DRAM {dram_now} W   "
+                f"TOTAL {power.total_now:.1f} W"
+            )
+
+        # ── IPC ───────────────────────────────────────────────
+
+        def _on_ipc_connection(self) -> None:
+            connection = self._ipc.nextPendingConnection()
+            if connection is None:
+                return
+            if (
+                connection.waitForReadyRead(2000)
+                and connection.readAll().data() == b"show_menu"
+            ):
+                self._notify(
+                    "NVIDIA P-State Switcher",
+                    "Already running — check the system tray.",
+                )
+            connection.close()
+
+        def _on_activate(self, reason) -> None:
+            if reason == QtWidgets.QSystemTrayIcon.ActivationReason.DoubleClick:
+                self._refresh()
+
+
+else:  # pragma: no cover - Qt-less fallbacks
+    class CommandRunner:  # type: ignore[no-redef]
+        pass
+
+    class TrayApp:  # type: ignore[no-redef]
+        pass
+
+
+# ── entry points ──────────────────────────────────────────
+
+def _notify_running_instance() -> bool:
+    """Poke an already running tray so it explains itself."""
+    import socket as _socket
+
+    try:
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as sock:
+            sock.settimeout(1)
+            sock.connect(IPC_SOCKET)
+            sock.sendall(b"show_menu")
+        return True
+    except OSError:
+        return False
+
+
+def run_tray() -> int:
+    if not HAVE_QT:
+        print(
+            "PyQt6 is required for the tray. Install it (python3-pyqt6) or use "
+            "--dump-state / --pstate / --governor.",
+            file=sys.stderr,
+        )
+        return 2
+    if _notify_running_instance():
+        return 0
+    app = QtWidgets.QApplication(sys.argv)
+    app.setApplicationName("nvidia-pstate-switcher")
+    app.setQuitOnLastWindowClosed(False)
+    _tray = TrayApp()  # noqa: F841 - must stay referenced
+    return app.exec()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="nvidia-pstate-switcher",
+        description=(
+            "System tray for NVIDIA GPU P-states, CPU governor and "
+            "KDE Power Profiles. Without arguments it starts the tray."
+        ),
+    )
+    parser.add_argument("--version", action="version", version=__version__)
+    parser.add_argument(
+        "--dump-state", action="store_true",
+        help="print machine-readable state as JSON and exit",
+    )
+    parser.add_argument(
+        "--pstate", "--oneshot", dest="pstate", metavar="P",
+        help=f"set GPU P-state and exit (0-15, {PSTATE_AUTO} = auto)",
+    )
+    parser.add_argument(
+        "--governor", metavar="NAME",
+        help="set and pin the CPU governor (e.g. schedutil, performance)",
+    )
+    parser.add_argument(
+        "--unpin-governor", action="store_true",
+        help="clear the governor pin so automation regains control",
+    )
+    parser.add_argument(
+        "--profile", choices=sorted(PROFILE_MAP),
+        help="set the KDE power profile and exit",
+    )
+    parser.add_argument(
+        "--autostart", choices=("on", "off"),
+        help="enable or disable autostart and exit",
+    )
+    args = parser.parse_args(argv)
+
+    if args.dump_state:
+        print(json.dumps(collect_state(), indent=2))
+        return 0
+
+    if args.pstate is not None:
+        binary = _binary("nvidia-pstate")
+        if binary is None:
+            print("nvidia-pstate not found: pip install nvidia-pstate", file=sys.stderr)
+            return 2
+        result = subprocess.run(
+            [binary, "-ps", args.pstate], capture_output=True, text=True, check=False
+        )
+        if result.returncode != 0:
+            print((result.stderr or result.stdout).strip(), file=sys.stderr)
+            return result.returncode
+        cfg = load_config()
+        cfg["pstate"] = args.pstate
+        save_config(cfg)
+        return 0
+
+    if args.governor is not None:
+        ok, message = apply_governor(args.governor)
+        if not ok:
+            print(message, file=sys.stderr)
+            return 1
+        written, pin_message = write_pin(args.governor)
+        cfg = load_config()
+        cfg["governor"] = args.governor
+        save_config(cfg)
+        print(message if written else f"{message}; {pin_message}", file=sys.stderr)
+        return 0
+
+    if args.unpin_governor:
+        _, message = write_pin(None)
+        cfg = load_config()
+        cfg["governor"] = None
+        save_config(cfg)
+        print(message, file=sys.stderr)
+        return 0
+
+    if args.autostart is not None:
+        enabled = args.autostart == "on"
+        set_autostart(enabled)
+        cfg = load_config()
+        cfg["autostart"] = enabled
+        save_config(cfg)
+        return 0
+
+    if args.profile is not None:
+        ok, message = set_power_profile(args.profile)
+        if not ok:
+            print(message, file=sys.stderr)
+            return 1
+        return 0
+
+    return run_tray()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
