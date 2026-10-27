@@ -22,7 +22,7 @@ import time
 from collections import deque
 from statistics import mean
 
-__version__ = "2.0.0"
+__version__ = "0.2026.10.27"
 
 # ── configuration surface ─────────────────────────────────
 # Every path below can be overridden through the environment. That keeps the

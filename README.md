@@ -4,6 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
 [![PyQt6](https://img.shields.io/badge/PyQt-6-green.svg)](https://riverbankcomputing.com/software/pyqt/)
 [![CI](https://github.com/uladziislau/nvidia-pstate-switcher/actions/workflows/ci.yml/badge.svg)](https://github.com/uladziislau/nvidia-pstate-switcher/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/github/v/tag/uladziislau/nvidia-pstate-switcher?label=version&color=blue)](https://github.com/uladziislau/nvidia-pstate-switcher/tags)
 
 > **Русский**: [README.ru.md](README.ru.md)
 
@@ -232,6 +233,14 @@ python3 -m venv .venv && .venv/bin/pip install pytest ruff
 CI runs byte-compile, ruff, the test suite on Python 3.10–3.13, a CLI contract
 check and shellcheck for the installers. Tests need no GPU, no Qt and no D-Bus:
 external subsystems are replaced by temporary directories and parsers.
+
+## Author
+
+Uladzislau Darazhei — [github.com/uladziislau](https://github.com/uladziislau).
+
+Contributions are welcome: open an issue with the output of
+`nvidia-pstate-switcher --dump-state` and your desktop environment when
+reporting a problem.
 
 ## License
 

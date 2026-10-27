@@ -282,10 +282,20 @@ def _run(*args, env=None):
     )
 
 
-def test_cli_version_matches_module():
+def test_cli_version_matches_module(pstate):
     result = _run("--version")
     assert result.returncode == 0
-    assert result.stdout.strip() == "2.0.0"
+    assert result.stdout.strip() == pstate.__version__
+
+
+def test_version_is_calendar_scheme(pstate):
+    parts = pstate.__version__.split(".")
+    assert len(parts) == 4, "expected 0.YYYY.MM.DD"
+    major, year, month, day = parts
+    assert major == "0"
+    assert len(year) == 4 and 2000 <= int(year) <= 2999
+    assert 1 <= int(month) <= 12
+    assert 1 <= int(day) <= 31
 
 
 def test_cli_dump_state_is_valid_json_without_gui(monkeypatch):
@@ -294,7 +304,7 @@ def test_cli_dump_state_is_valid_json_without_gui(monkeypatch):
     result = _run("--dump-state", env=env)
     assert result.returncode == 0, result.stderr
     state = json.loads(result.stdout)
-    assert state["version"] == "2.0.0"
+    assert state["version"] == "0.2026.10.27"
     assert isinstance(state["available_governors"], list)
     assert "governor_pin" in state and "dependencies" in state
     assert set(state["gpu"]) == {"count", "pstate", "power_w"}

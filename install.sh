@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Install NVIDIA P-State Switcher.
 #
-#   sudo ./install.sh                 # system-wide, /usr/local (recommended)
-#   ./install.sh --prefix "$HOME/.local"   # per-user, no root
+#   sudo ./install.sh                     # system-wide, /usr/local (recommended)
+#   ./install.sh --prefix "$HOME/.local"  # per-user, no root
 #
 # The script is idempotent: re-running upgrades the binary in place and keeps
-# the existing ~/.config/nvidia-pstate-switcher.conf untouched.
+# the existing ~/.config/nvidia-pstate-switcher.conf untouched. It only asks for
+# sudo where the target directory is not writable by the current user.
 set -euo pipefail
 
 PREFIX="/usr/local"
@@ -39,25 +40,33 @@ SHARE_DIR="$PREFIX/share"
 ICON_DIR="$SHARE_DIR/icons/hicolor/scalable/apps"
 PIN_DIR="/etc/nvidia-pstate-switcher"
 
-as_root() {
-  if [ "$(id -u)" -eq 0 ]; then
-    "$@"
-  else
-    sudo "$@"
+# Is the final path (or its nearest existing parent) writable by this user?
+writable_target() {
+  local target="$1" parent
+  if [ -e "$target" ]; then
+    [ -w "$target" ]
+    return
   fi
+  parent="$(dirname "$target")"
+  while [ ! -e "$parent" ] && [ "$parent" != "/" ]; do
+    parent="$(dirname "$parent")"
+  done
+  [ -w "$parent" ]
 }
 
-need_write_access() {
-  local dir="$1"
-  if [ -w "$dir" ] || [ "$(id -u)" -eq 0 ]; then
-    return 0
+# Run a command as root only when the destination needs it.
+place() {
+  local mode="$1" src="$2" dst="$3"
+  if writable_target "$dst"; then
+    mkdir -p "$(dirname "$dst")"
+    install -m "$mode" "$src" "$dst"
+  elif sudo -n true 2>/dev/null; then
+    sudo install -D -m "$mode" "$src" "$dst"
+  else
+    echo "error: $dst needs root (no passwordless sudo available)" >&2
+    echo "       run: sudo ./install.sh  —  or  ./install.sh --prefix \"\$HOME/.local\"" >&2
+    exit 1
   fi
-  if sudo -n true 2>/dev/null; then
-    return 0
-  fi
-  echo "error: no write access to $dir and no passwordless sudo" >&2
-  echo "       try: sudo ./install.sh   or   ./install.sh --prefix \"\$HOME/.local\"" >&2
-  exit 1
 }
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -70,28 +79,30 @@ python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' || {
   exit 1
 }
 
-need_write_access "$BIN_DIR"
-as_root install -d "$BIN_DIR"
-as_root install -m 0755 "$SRC_DIR/nvidia-pstate-switcher.py" "$BIN_DIR/nvidia-pstate-switcher"
+place 0755 "$SRC_DIR/nvidia-pstate-switcher.py" "$BIN_DIR/nvidia-pstate-switcher"
 
 if [ -f "$SRC_DIR/icons/nvidia-pstate-switcher.svg" ]; then
-  as_root install -d "$ICON_DIR"
-  as_root install -m 0644 "$SRC_DIR/icons/nvidia-pstate-switcher.svg" \
+  place 0644 "$SRC_DIR/icons/nvidia-pstate-switcher.svg" \
     "$ICON_DIR/nvidia-pstate-switcher.svg"
-  command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+  if command -v gtk-update-icon-cache >/dev/null 2>&1 &&
+     [ -d "$SHARE_DIR/icons/hicolor" ]; then
     gtk-update-icon-cache -q -t -f "$SHARE_DIR/icons/hicolor" 2>/dev/null || true
+  fi
 fi
 
-# Governor pin lives outside $HOME on purpose: system guards (for example a
-# cpufreq watchdog timer) run as root and must be able to read the intent.
+# Governor pin lives outside $HOME on purpose: root-owned watchdogs must be able
+# to read the intent. Without root the tray falls back to a per-user pin file.
 if [ "$CREATE_PIN_DIR" -eq 1 ]; then
   if [ "$(id -u)" -eq 0 ] || sudo -n true 2>/dev/null; then
-    as_root install -d -m 2775 "$PIN_DIR"
-    if getent group power >/dev/null 2>&1; then
-      as_root chgrp power "$PIN_DIR"
+    if [ "$(id -u)" -eq 0 ]; then
+      install -d -m 2775 "$PIN_DIR"
+      getent group power >/dev/null 2>&1 && chgrp power "$PIN_DIR" || true
+    else
+      sudo install -d -m 2775 "$PIN_DIR"
+      getent group power >/dev/null 2>&1 && sudo chgrp power "$PIN_DIR" || true
     fi
   else
-    echo "note: skipped $PIN_DIR (no root); the tray will enforce the pin itself" >&2
+    echo "note: skipped $PIN_DIR (no root); the tray will keep the pin per user" >&2
   fi
 fi
 
@@ -114,4 +125,5 @@ if [ ${#missing[@]} -gt 0 ]; then
 fi
 
 echo "verify:  $BIN_DIR/nvidia-pstate-switcher --dump-state"
-echo "start:   $BIN_DIR/nvidia-pstate-switcher   (add to autostart from the menu)"
+echo "start:   $BIN_DIR/nvidia-pstate-switcher"
+echo "autostart: $BIN_DIR/nvidia-pstate-switcher --autostart on"

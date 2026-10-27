@@ -11,7 +11,7 @@
         "Id": "org.nvidia.pstate.monitor",
         "License": "MIT",
         "Name": "NVIDIA P-State",
-        "Version": "2.0.0",
+        "Version": "0.2026.10.27",
         "Website": "https://github.com/uladziislau/nvidia-pstate-switcher"
     },
     "X-Plasma-API": "declarative",

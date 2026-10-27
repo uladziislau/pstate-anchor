@@ -1,10 +1,12 @@
 # Changelog
 
 All notable changes to this project are documented here.
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
-and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [2.0.0] - 2026-10-27
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+Versions are calendar-based: `0.YYYY.MM.DD`. The leading zero marks the project
+as pre-1.0 — the CLI and the config file are stable, internal APIs are not.
+
+## [0.2026.10.27] - 2026-10-27
 
 First release prepared as a standalone, community-oriented project.
 
@@ -52,14 +54,14 @@ First release prepared as a standalone, community-oriented project.
 - Crash when `nvidia-smi` returned more than one line of GPU data.
 - The active governor was never check-marked when it was `schedutil`.
 
-### Migration from 1.x
+### Migration from 1.0.0
 
 The configuration file format is unchanged; `pstate` and `autostart` keep
 working. The new optional `governor` key stores the pinned governor. Install
 the pin directory once with `sudo ./install.sh`, or let the tray enforce the pin
 from the session when the file is not writable.
 
-## [1.0.0] - 2025-06-26
+## [0.2025.06.26] - 2025-06-26
 
 - Initial public release: tray with manual P-state switching, autostart,
   `--oneshot` mode and an investigation of the GSP P0 bug.
