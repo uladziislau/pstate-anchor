@@ -839,6 +839,8 @@ if HAVE_QT:
                 self._smi_bin, "--query-gpu=index,power.draw,pstate",
                 "--format=csv,noheader,nounits",
             ])
+            # The pin can also be set by the CLI or by another session.
+            self._pin = read_pin()
             counters = read_rapl_counters()
             if counters is not None:
                 self._power.add_rapl_samples(*counters)
