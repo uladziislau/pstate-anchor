@@ -130,8 +130,23 @@ How the pin fixes that:
 2. Every 2 seconds the tray compares the live governor with the pin and
    re-applies the pinned value if something changed it.
 3. Third-party watchdogs must honour the pin: when the file exists and holds a
-   valid name, automation should not switch the governor. A ready-made example
-   lives in `examples/cpufreq-guard.sh`.
+   valid name, automation should not switch the governor.
+
+The other half of the contract ships with the project — install it once:
+
+```bash
+sudo ./install.sh --with-guard
+```
+
+`pstate-anchor-guard` runs from a systemd timer every 15 s: it re-applies the
+pinned governor, and uses `DEFAULT_GOVERNOR` (from
+`/etc/default/pstate-anchor-guard`) when no pin exists. Check its decision
+without changing anything:
+
+```bash
+sudo /usr/local/sbin/pstate-anchor-guard --check
+# current=schedutil target=performance source=pin
+```
 
 Release the pin with **Follow system (unpin)** or `--unpin-governor`; the file is
 removed and automation becomes authoritative again.

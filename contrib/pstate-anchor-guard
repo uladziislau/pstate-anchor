@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# pstate-anchor-guard — keep the CPU governor that the user asked for.
+#
+# The tray (pstate-anchor) writes the chosen governor to a pin file. Laptops and
+# desktops often run something that flips the governor back (power-profiles-
+# daemon, a distribution tuning profile, a custom sched_ext watchdog). This
+# guard is the other half of the contract: it re-applies the pinned value and
+# falls back to $DEFAULT_GOVERNOR when no pin exists.
+#
+# Pin locations, first match wins:
+#   $PSTATE_PIN_FILE  (default /etc/pstate-anchor/governor-pin)
+#   /home/*/.config/pstate-anchor/governor-pin   (per-user install fallback)
+#
+# Installation: ./install.sh --with-guard   (see README)
+# Diagnostics:  pstate-anchor-guard --check  (prints the decision, changes nothing)
+set -euo pipefail
+
+GOV_PATH="${PSTATE_GOVERNOR_PATH:-/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor}"
+AVAILABLE_PATH="${PSTATE_AVAILABLE_GOVERNORS_PATH:-/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors}"
+DEFAULT_GOVERNOR="${DEFAULT_GOVERNOR:-schedutil}"
+TAG="pstate-anchor-guard"
+
+[ -r "$GOV_PATH" ] || exit 0
+
+log() {
+  if command -v logger >/dev/null 2>&1; then
+    logger -t "$TAG" "$*"
+  else
+    printf '%s: %s\n' "$TAG" "$*" >&2
+  fi
+}
+
+read_pin() {
+  local file value
+  shopt -s nullglob
+  for file in "${PSTATE_PIN_FILE:-/etc/pstate-anchor/governor-pin}" \
+              /home/*/.config/pstate-anchor/governor-pin; do
+    [ -r "$file" ] || continue
+    value="$(tr -d '[:space:]' < "$file")"
+    [ -n "$value" ] && { printf '%s' "$value"; return 0; }
+  done
+  return 0
+}
+
+available() {
+  [ -r "$AVAILABLE_PATH" ] && grep -qw "$1" "$AVAILABLE_PATH"
+}
+
+TARGET="$DEFAULT_GOVERNOR"
+PINNED="$(read_pin)"
+if [ -n "$PINNED" ]; then
+  if available "$PINNED"; then
+    TARGET="$PINNED"
+  else
+    log "pin '$PINNED' is not offered by the kernel, keeping $DEFAULT_GOVERNOR"
+    PINNED=""
+  fi
+fi
+
+CURRENT="$(cat "$GOV_PATH")"
+
+if [ "${1:-}" = "--check" ]; then
+  printf 'current=%s target=%s source=%s\n' "$CURRENT" "$TARGET" \
+    "$([ -n "$PINNED" ] && echo pin || echo default)"
+  exit 0
+fi
+
+[ "$CURRENT" = "$TARGET" ] && exit 0
+
+# Prefer a direct sysfs write (works for group-writable setups and tests);
+# fall back to cpupower, which needs root.
+if [ -w "$GOV_PATH" ]; then
+  printf '%s' "$TARGET" > "$GOV_PATH" 2>/dev/null || true
+fi
+if [ "$(cat "$GOV_PATH")" != "$TARGET" ] && command -v cpupower >/dev/null 2>&1; then
+  cpupower frequency-set -g "$TARGET" >/dev/null 2>&1 || true
+fi
+
+NEW="$(cat "$GOV_PATH")"
+if [ "$NEW" = "$TARGET" ]; then
+  log "governor restored: $CURRENT -> $TARGET ($([ -n "$PINNED" ] && echo pin || echo default))"
+else
+  log "failed to set $TARGET (was $CURRENT, now $NEW)"
+fi

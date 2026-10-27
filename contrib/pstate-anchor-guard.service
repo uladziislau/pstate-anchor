@@ -1,0 +1,8 @@
+[Unit]
+Description=Keep the governor pinned by pstate-anchor (fallback: $DEFAULT_GOVERNOR)
+Documentation=https://github.com/uladziislau/pstate-anchor
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/pstate-anchor-guard
+ExecStart=/usr/local/sbin/pstate-anchor-guard

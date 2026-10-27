@@ -293,6 +293,82 @@ def test_ensure_desktop_entry_is_idempotent(pstate, tmp_path):
     assert desktop.read_text() == "# user edit\n"
 
 
+
+# ── guard contract ────────────────────────────────────────
+
+GUARD = SCRIPT.parent / "contrib" / "pstate-anchor-guard"
+
+
+def _guard_tree(tmp_path, current, available="schedutil powersave performance"):
+    governor = tmp_path / "scaling_governor"
+    governor.write_text(current + "\n")
+    avail = tmp_path / "scaling_available_governors"
+    avail.write_text(available + "\n")
+    return governor, avail
+
+
+def _run_guard(env, *args):
+    return subprocess.run(
+        ["bash", str(GUARD), *args], capture_output=True, text=True, env=env, timeout=30,
+    )
+
+
+def _guard_env(governor, avail, pin=None, default="schedutil"):
+    env = os.environ.copy()
+    env.update({
+        "PSTATE_GOVERNOR_PATH": str(governor),
+        "PSTATE_AVAILABLE_GOVERNORS_PATH": str(avail),
+        "PSTATE_PIN_FILE": str(pin) if pin else str(governor.parent / "absent-pin"),
+        "DEFAULT_GOVERNOR": default,
+    })
+    return env
+
+
+def test_guard_applies_the_pin(tmp_path):
+    governor, avail = _guard_tree(tmp_path, "schedutil")
+    pin = tmp_path / "governor-pin"
+    pin.write_text("powersave\n")
+    result = _run_guard(_guard_env(governor, avail, pin))
+    assert result.returncode == 0, result.stderr
+    assert governor.read_text().strip() == "powersave"
+
+
+def test_guard_falls_back_to_default_without_pin(tmp_path):
+    governor, avail = _guard_tree(tmp_path, "performance")
+    result = _run_guard(_guard_env(governor, avail, default="schedutil"))
+    assert result.returncode == 0, result.stderr
+    assert governor.read_text().strip() == "schedutil"
+
+
+def test_guard_ignores_a_pin_the_kernel_does_not_offer(tmp_path):
+    governor, avail = _guard_tree(tmp_path, "performance")
+    pin = tmp_path / "governor-pin"
+    pin.write_text("turbo\n")
+    result = _run_guard(_guard_env(governor, avail, pin, default="schedutil"))
+    assert result.returncode == 0, result.stderr
+    assert governor.read_text().strip() == "schedutil"
+
+
+def test_guard_check_reports_the_decision_without_changing_anything(tmp_path):
+    governor, avail = _guard_tree(tmp_path, "performance")
+    pin = tmp_path / "governor-pin"
+    pin.write_text("powersave\n")
+    result = _run_guard(_guard_env(governor, avail, pin), "--check")
+    assert result.returncode == 0, result.stderr
+    assert "current=performance" in result.stdout
+    assert "target=powersave" in result.stdout
+    assert "source=pin" in result.stdout
+    assert governor.read_text().strip() == "performance"
+
+
+def test_guard_is_a_noop_when_already_pinned(tmp_path):
+    governor, avail = _guard_tree(tmp_path, "powersave")
+    pin = tmp_path / "governor-pin"
+    pin.write_text("powersave\n")
+    result = _run_guard(_guard_env(governor, avail, pin))
+    assert result.returncode == 0, result.stderr
+    assert governor.read_text().strip() == "powersave"
+
 # ── invariants ────────────────────────────────────────────
 
 def test_profile_map_uses_offered_governors_and_pstates(pstate):

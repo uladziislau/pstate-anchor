@@ -1,0 +1,10 @@
+[Unit]
+Description=Check the cpufreq governor every 15 s
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=15
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target

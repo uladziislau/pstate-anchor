@@ -131,8 +131,22 @@ power-profiles-daemon не зафиксировал минимальную ча�
 2. Трей раз в 2 секунды сверяет фактический governor с пином и возвращает
    закреплённое значение, если кто-то его изменил.
 3. Сторонние сторожа должны уважать пин: если файл существует и содержит
-   валидное имя, автоматика не должна переключать governor. Готовый пример —
-   `examples/cpufreq-guard.sh`.
+   валидное имя, автоматика не должна переключать governor.
+
+Вторая половина контракта поставляется вместе с проектом:
+
+```bash
+sudo ./install.sh --with-guard
+```
+
+`pstate-anchor-guard` работает из systemd-таймера каждые 15 с: возвращает
+закреплённый governor, а при отсутствии пина ставит `DEFAULT_GOVERNOR` из
+`/etc/default/pstate-anchor-guard`. Посмотреть решение без изменений:
+
+```bash
+sudo /usr/local/sbin/pstate-anchor-guard --check
+# current=schedutil target=performance source=pin
+```
 
 Снять закрепление: пункт **Follow system (unpin)** в меню или
 `--unpin-governor`. Файл пина удаляется, автоматика снова главная.
