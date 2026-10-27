@@ -30,7 +30,7 @@ costs in watts.
 
 | Menu section | What it does |
 |---|---|
-| **Power Profile** | Switches the KDE profile (`power-saver` / `balanced` / `performance`) over D-Bus PowerProfiles; each profile also applies its GPU P-state and governor |
+| **Power Profile** | Switches the KDE profile (`power-saver` / `balanced` / `performance`) over D-Bus PowerProfiles. It does **not** touch the P-state or the governor: those stay under your explicit control (menu or pin) |
 | **CPU Governor** | List comes from `scaling_available_governors` (includes `schedutil`); the chosen governor is **pinned** so automation stops reverting it |
 | **GPU P-State** | P0 / P2 / P3 / P5 / P8 plus Auto (driver control); the choice survives reboots |
 | **Status** | Current governor, active pin, profile, P-state, GPU power, CPU package and DRAM — instant and 1-minute average |

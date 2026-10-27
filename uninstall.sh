@@ -62,6 +62,18 @@ if [ -e "$ICON" ]; then
 fi
 
 if [ "$PURGE" -eq 1 ]; then
+  # The watchdog runs from a systemd timer; leaving it behind means it keeps
+  # firing against a missing binary (and would keep forcing a governor).
+  GUARD_UNIT="/etc/systemd/system/pstate-anchor-guard.timer"
+  if [ -e "$GUARD_UNIT" ] || [ -e "/usr/local/sbin/pstate-anchor-guard" ]; then
+    as_root systemctl disable --now pstate-anchor-guard.timer 2>/dev/null || true
+    as_root rm -f "$GUARD_UNIT" \
+      "/etc/systemd/system/pstate-anchor-guard.service" \
+      "$PREFIX/sbin/pstate-anchor-guard" \
+      "/etc/default/pstate-anchor-guard"
+    as_root systemctl daemon-reload 2>/dev/null || true
+    echo "removed the governor guard and its policy"
+  fi
   CONFIG_BASE="${XDG_CONFIG_HOME:-$HOME/.config}"
   rm -f "$CONFIG_BASE/pstate-anchor.conf"
   rm -f "$CONFIG_BASE/autostart/pstate-anchor.desktop"

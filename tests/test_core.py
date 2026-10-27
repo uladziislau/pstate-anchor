@@ -216,6 +216,27 @@ def test_write_pin_none_clears(pstate, tmp_path, fake_sysfs):
     assert pstate.write_pin(None, path=str(pin))[0] is True  # idempotent
 
 
+# ── KDE profile parsing ───────────────────────────────────
+
+def test_parse_gdbus_string_unwraps_the_tuple(pstate):
+    assert pstate.parse_gdbus_string("(<'performance'>,)") == "performance"
+    assert pstate.parse_gdbus_string("('powersave',)") == "powersave"
+    assert pstate.parse_gdbus_string("(<'power-saver'>,)") == "power-saver"
+
+
+def test_parse_gdbus_string_rejects_garbage(pstate):
+    assert pstate.parse_gdbus_string("") is None
+    assert pstate.parse_gdbus_string("Error: no such service") is None
+    assert pstate.parse_gdbus_string("()") is None
+
+
+def test_power_profile_command_is_a_single_source(pstate):
+    argv = pstate.power_profile_command()
+    assert argv[:3] == ["gdbus", "call", "--system"]
+    assert "net.hadess.PowerProfiles" in argv
+    assert argv[-1] == "ActiveProfile"
+
+
 # ── nvidia-smi parsing ────────────────────────────────────
 
 def test_parse_smi_single_gpu(pstate):
@@ -498,6 +519,26 @@ def test_tray_refuses_to_start_without_pyqt():
     )
     assert result.returncode == 2
     assert "PyQt6 is required" in result.stderr
+
+
+def test_cli_rejects_invalid_pstate_before_touching_nvidia(pstate, tmp_path):
+    env = os.environ.copy()
+    env["PATH"] = str(tmp_path)
+    result = _run("--pstate", "abc", env=env)
+    assert result.returncode == 2
+    assert "invalid P-state" in result.stderr
+    assert "pip install" not in result.stderr, "validation must run first"
+
+
+def test_pstate_value_accepts_boundaries(pstate):
+    assert pstate.pstate_value("0") == "0"
+    assert pstate.pstate_value("16") == "16"
+    for bad in ("17", "-1", "abc", "1.5"):
+        try:
+            pstate.pstate_value(bad)
+        except __import__("argparse").ArgumentTypeError:
+            continue
+        raise AssertionError(f"{bad!r} should be rejected")
 
 
 def test_cli_pstate_without_nvidia_pstate_fails_cleanly(tmp_path):

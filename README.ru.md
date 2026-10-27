@@ -30,7 +30,7 @@ GSP-прошивка NVIDIA может держать GPU в P0 даже на с
 
 | Раздел меню | Что делает |
 |---|---|
-| **Power Profile** | Переключение профиля KDE (`power-saver` / `balanced` / `performance`) через D-Bus PowerProfiles; профиль синхронно применяет свой GPU P-state и governor |
+| **Power Profile** | Переключение профиля KDE (`power-saver` / `balanced` / `performance`) через D-Bus PowerProfiles. P-state и governor профиль **не** трогает: они остаются под вашим явным управлением (меню или пин) |
 | **CPU Governor** | Список берётся из `scaling_available_governors` (включая `schedutil`); выбранный governor **закрепляется**, чтобы автоматика его не откатывала |
 | **GPU P-State** | P0 / P2 / P3 / P5 / P8 и Auto (управление драйвером), сохраняется между перезагрузками |
 | **Status** | Текущий governor, активный пин, профиль, P-state, мощность GPU, CPU package и DRAM — мгновенно и среднее за минуту |

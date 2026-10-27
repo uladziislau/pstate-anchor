@@ -290,31 +290,41 @@ def apply_governor(
     return False, last_error or "governor did not change"
 
 
+def parse_gdbus_string(raw: str) -> str | None:
+    """Extract the value from gdbus output such as `(<'performance'>,)`."""
+    text = raw.strip()
+    if not text.startswith("("):
+        return None
+    inner = text[1:text.rindex(")")] if text.endswith(")") else text[1:]
+    value = inner.strip().rstrip(",").strip().strip("<>'\"")
+    return value or None
+
+
+def power_profile_command() -> list[str]:
+    """argv that prints the active KDE Power Profile (single source of truth)."""
+    return [
+        "gdbus", "call", "--system",
+        "--dest", PP_SERVICE,
+        "--object-path", PP_PATH,
+        "--method", "org.freedesktop.DBus.Properties.Get",
+        PP_IFACE, "ActiveProfile",
+    ]
+
+
 def read_power_profile() -> str | None:
     """Active KDE Power Profile via gdbus (no Qt, hence CLI friendly)."""
     if shutil.which("gdbus") is None:
         return None
     try:
         result = subprocess.run(
-            [
-                "gdbus", "call", "--system",
-                "--dest", PP_SERVICE,
-                "--object-path", PP_PATH,
-                "--method", "org.freedesktop.DBus.Properties.Get",
-                PP_IFACE, "ActiveProfile",
-            ],
+            power_profile_command(),
             capture_output=True, text=True, timeout=5, check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
         return None
-    raw = result.stdout.strip()
-    if not raw.startswith("("):
-        return None
-    inner = raw[1:raw.rindex(")")] if raw.endswith(")") else raw[1:]
-    value = inner.strip().rstrip(",").strip().strip("<>'\"")
-    return value or None
+    return parse_gdbus_string(result.stdout)
 
 
 def set_power_profile(profile: str) -> tuple[bool, str]:
@@ -648,13 +658,25 @@ except ImportError:  # pragma: no cover - exercised only on Qt-less boxes
 
 if HAVE_QT:
 
-    _icon_cache: dict[str, QtGui.QIcon] = {}
+    _icon_cache: dict[tuple[str, str], QtGui.QIcon] = {}
+
+
+    def _icon_color() -> QtGui.QColor:
+        """Text colour of the current theme: white icons vanish on light panels."""
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            color = app.palette().color(QtGui.QPalette.ColorRole.WindowText)
+            if color.isValid():
+                return color
+        return QtGui.QColor("white")
 
 
     def _render_icon(label: str, size: int = 48):
         """Draw the P-state label onto a transparent pixmap."""
-        if label in _icon_cache:
-            return _icon_cache[label]
+        color = _icon_color()
+        key = (label, color.name())
+        if key in _icon_cache:
+            return _icon_cache[key]
 
         pixmap = QtGui.QPixmap(size, size)
         pixmap.fill(QtCore.Qt.GlobalColor.transparent)
@@ -673,16 +695,16 @@ if HAVE_QT:
             (size - bounds.height()) / 2 - bounds.y(),
         )
 
-        painter.setPen(QtGui.QPen(QtGui.QColor("white"), 2))
+        painter.setPen(QtGui.QPen(color, 2))
         painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
         painter.drawPath(path)
         painter.setPen(QtCore.Qt.PenStyle.NoPen)
-        painter.setBrush(QtGui.QColor("white"))
+        painter.setBrush(color)
         painter.drawPath(path)
         painter.end()
 
         icon = QtGui.QIcon(pixmap)
-        _icon_cache[label] = icon
+        _icon_cache[key] = icon
         return icon
 
 
@@ -723,6 +745,8 @@ if HAVE_QT:
             self._pin = read_pin()
             self._last_pin_apply = 0.0
             self._current_label = "—"
+            self._current_profile: str | None = None
+            self._current_governor: str | None = None
             self._power = PowerMonitor()
             self._pstates = dict(DEFAULT_PSTATES)
 
@@ -738,6 +762,12 @@ if HAVE_QT:
             self._pstate_runner = CommandRunner()
             self._pstate_runner.finished.connect(lambda _: self._refresh())
             self._pstate_runner.failed.connect(self._on_pstate_failure)
+
+            # Read the KDE profile asynchronously: a blocking gdbus call in the
+            # refresh loop could stall the tray for up to its 5 s timeout.
+            self._profile_runner = CommandRunner()
+            self._profile_runner.finished.connect(self._on_profile_ok)
+            self._gdbus = shutil.which("gdbus")
 
             self._build_menu()
 
@@ -757,6 +787,9 @@ if HAVE_QT:
             self._ipc.newConnection.connect(self._on_ipc_connection)
 
             self.activated.connect(self._on_activate)
+            QtWidgets.QApplication.instance().paletteChanged.connect(
+                lambda _: self._repaint_icon()
+            )
             self.setIcon(_render_icon("—"))
             self.setToolTip("P-State Anchor")
             self.show()
@@ -907,8 +940,13 @@ if HAVE_QT:
             if counters is not None:
                 self._power.add_rapl_samples(*counters)
             self._current_governor = read_governor()
-            self._current_profile = read_power_profile()
+            if self._gdbus:
+                self._profile_runner.run(power_profile_command())
             self._enforce_pin()
+            self._update_display()
+
+        def _on_profile_ok(self, raw: str) -> None:
+            self._current_profile = parse_gdbus_string(raw)
             self._update_display()
 
         def _enforce_pin(self) -> None:
@@ -972,18 +1010,23 @@ if HAVE_QT:
         # ── IPC ───────────────────────────────────────────────
 
         def _on_ipc_connection(self) -> None:
-            connection = self._ipc.nextPendingConnection()
-            if connection is None:
-                return
-            if (
-                connection.waitForReadyRead(2000)
-                and connection.readAll().data() == b"show_menu"
-            ):
+            while (connection := self._ipc.nextPendingConnection()) is not None:
+                connection.readyRead.connect(
+                    lambda conn=connection: self._on_ipc_data(conn)
+                )
+                connection.disconnected.connect(connection.deleteLater)
+
+        def _on_ipc_data(self, connection) -> None:
+            if connection.readAll().data() == b"show_menu":
                 self._notify(
                     "P-State Anchor",
                     "Already running — check the system tray.",
                 )
             connection.close()
+
+        def _repaint_icon(self) -> None:
+            _icon_cache.clear()
+            self.setIcon(_render_icon(self._current_label))
 
         def _on_activate(self, reason) -> None:
             if reason == QtWidgets.QSystemTrayIcon.ActivationReason.DoubleClick:
@@ -1031,6 +1074,15 @@ def run_tray() -> int:
     return app.exec()
 
 
+def pstate_value(raw: str) -> str:
+    """argparse type for P-state ids: 0-15, or 16 for "driver decides"."""
+    if not raw.isdigit() or int(raw) > 16:
+        raise argparse.ArgumentTypeError(
+            f"invalid P-state {raw!r}: expected 0-15 or {PSTATE_AUTO} (auto)"
+        )
+    return raw
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="pstate-anchor",
@@ -1045,7 +1097,7 @@ def main(argv: list[str] | None = None) -> int:
         help="print machine-readable state as JSON and exit",
     )
     parser.add_argument(
-        "--pstate", "--oneshot", dest="pstate", metavar="P",
+        "--pstate", "--oneshot", dest="pstate", metavar="P", type=pstate_value,
         help=f"set GPU P-state and exit (0-15, {PSTATE_AUTO} = auto)",
     )
     parser.add_argument(
