@@ -96,10 +96,14 @@ if [ "$CREATE_PIN_DIR" -eq 1 ]; then
   if [ "$(id -u)" -eq 0 ] || sudo -n true 2>/dev/null; then
     if [ "$(id -u)" -eq 0 ]; then
       install -d -m 2775 "$PIN_DIR"
-      getent group power >/dev/null 2>&1 && chgrp power "$PIN_DIR" || true
+      if getent group power >/dev/null 2>&1; then
+        chgrp power "$PIN_DIR"
+      fi
     else
       sudo install -d -m 2775 "$PIN_DIR"
-      getent group power >/dev/null 2>&1 && sudo chgrp power "$PIN_DIR" || true
+      if getent group power >/dev/null 2>&1; then
+        sudo chgrp power "$PIN_DIR"
+      fi
     fi
   else
     echo "note: skipped $PIN_DIR (no root); the tray will keep the pin per user" >&2
