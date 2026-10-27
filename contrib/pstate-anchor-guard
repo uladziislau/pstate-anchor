@@ -23,11 +23,21 @@ TAG="pstate-anchor-guard"
 [ -r "$GOV_PATH" ] || exit 0
 
 log() {
-  if command -v logger >/dev/null 2>&1; then
-    logger -t "$TAG" "$*"
-  else
-    printf '%s: %s\n' "$TAG" "$*" >&2
-  fi
+  case "${PSTATE_GUARD_LOG:-auto}" in
+    stderr)
+      printf '%s: %s\n' "$TAG" "$*" >&2
+      ;;
+    journal)
+      logger -t "$TAG" "$*"
+      ;;
+    *)
+      if command -v logger >/dev/null 2>&1; then
+        logger -t "$TAG" "$*"
+      else
+        printf '%s: %s\n' "$TAG" "$*" >&2
+      fi
+      ;;
+  esac
 }
 
 read_pin() {

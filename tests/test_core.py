@@ -348,6 +348,7 @@ def _guard_env(governor, avail, pin=None, default="schedutil"):
         "PSTATE_AVAILABLE_GOVERNORS_PATH": str(avail),
         "PSTATE_PIN_FILE": str(pin) if pin else str(governor.parent / "absent-pin"),
         "DEFAULT_GOVERNOR": default,
+        "PSTATE_GUARD_LOG": "stderr",
     })
     return env
 
@@ -387,6 +388,12 @@ def test_guard_check_reports_the_decision_without_changing_anything(tmp_path):
     assert "target=powersave" in result.stdout
     assert "source=pin" in result.stdout
     assert governor.read_text().strip() == "performance"
+
+
+def test_guard_logs_to_stderr_when_asked(tmp_path):
+    governor, avail = _guard_tree(tmp_path, "performance")
+    result = _run_guard(_guard_env(governor, avail, default="schedutil"))
+    assert "governor restored: performance -> schedutil" in result.stderr
 
 
 def test_guard_is_a_noop_when_already_pinned(tmp_path):
