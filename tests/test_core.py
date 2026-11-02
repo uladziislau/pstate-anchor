@@ -19,7 +19,12 @@ SCRIPT = Path(__file__).resolve().parent.parent / "pstate-anchor.py"
 
 def test_load_config_defaults_when_missing(pstate, tmp_path):
     cfg = pstate.load_config(str(tmp_path / "absent.conf"))
-    assert cfg == {"pstate": pstate.PSTATE_AUTO, "autostart": True, "governor": None}
+    assert cfg == {
+        "pstate": pstate.PSTATE_AUTO,
+        "autostart": True,
+        "governor": None,
+        "power_limit": None,
+    }
 
 
 def test_load_config_survives_broken_json(pstate, tmp_path):
@@ -474,7 +479,8 @@ def test_cli_dump_state_is_valid_json_without_gui(monkeypatch):
     result = _run("--dump-state", env=env)
     assert result.returncode == 0, result.stderr
     state = json.loads(result.stdout)
-    assert state["version"] == "0.2026.10.27"
+    assert state["version"].startswith("0.")
+    assert "power_limit" in state
     assert isinstance(state["available_governors"], list)
     assert "governor_pin" in state and "dependencies" in state
     assert set(state["gpu"]) == {"count", "pstate", "power_w"}
@@ -548,3 +554,123 @@ def test_cli_pstate_without_nvidia_pstate_fails_cleanly(tmp_path):
     result = _run("--pstate", "5", env=env)
     assert result.returncode == 2
     assert "pip install nvidia-pstate" in result.stderr
+
+
+# ── RAPL power limits ─────────────────────────────────────
+
+def _limit_files(tmp_path, pl1_uw=145_000_000, pl2_uw=174_000_000,
+                 pl1_max_uw=145_000_000, pl2_max_uw=290_000_000):
+    files = {}
+    for name, value in (
+        ("pl1", pl1_uw), ("pl2", pl2_uw),
+        ("pl1_max", pl1_max_uw), ("pl2_max", pl2_max_uw),
+    ):
+        path = tmp_path / f"{name}.uw"
+        path.write_text(f"{value}\n")
+        files[name] = str(path)
+    return files
+
+
+def test_parse_power_limit_spec_understands_presets_and_pairs(pstate):
+    assert pstate.parse_power_limit_spec("eco") == (105, 125)
+    assert pstate.parse_power_limit_spec(" Stock ") == (145, 174)
+    assert pstate.parse_power_limit_spec("110/140") == (110, 140)
+    assert pstate.parse_power_limit_spec("120") == (120, 174)
+
+
+def test_parse_power_limit_spec_rejects_garbage(pstate):
+    import pytest
+
+    for raw in ("", "fast", "110/", "1e3"):
+        with pytest.raises(ValueError):
+            pstate.parse_power_limit_spec(raw)
+
+
+def test_validate_power_limits_only_rejects_non_positive(pstate):
+    # The firmware-reported maxima are a heuristic, not a hard limit:
+    # values above them are accepted and left to the kernel.
+    assert pstate.validate_power_limits(145, 174, (145, 290)) is None
+    assert pstate.validate_power_limits(200, 300, (145, 290)) is None
+    assert "positive" in pstate.validate_power_limits(0, 100, None)
+
+
+def test_read_power_limits_converts_microwatts(pstate, tmp_path):
+    files = _limit_files(tmp_path)
+    assert pstate.read_power_limits(files["pl1"], files["pl2"]) == (145, 174)
+
+
+def test_read_power_limits_absent_domain(pstate, tmp_path):
+    assert pstate.read_power_limits(
+        str(tmp_path / "nope"), str(tmp_path / "nope2")
+    ) is None
+
+
+def test_apply_power_limits_writes_sysfs_directly(pstate, tmp_path, monkeypatch):
+    files = _limit_files(tmp_path)
+    monkeypatch.setattr(pstate, "POWER_LIMIT_HELPER", str(tmp_path / "no-helper"))
+    ok, message = pstate.apply_power_limits(
+        105, 125,
+        pl1_path=files["pl1"], pl2_path=files["pl2"],
+        bounds=(145, 290),
+    )
+    assert ok, message
+    assert pstate.read_power_limits(files["pl1"], files["pl2"]) == (105, 125)
+
+
+def test_apply_power_limits_accepts_value_above_heuristic_ceiling(pstate, tmp_path, monkeypatch):
+    files = _limit_files(tmp_path)
+    monkeypatch.setattr(pstate, "POWER_LIMIT_HELPER", str(tmp_path / "no-helper"))
+    ok, message = pstate.apply_power_limits(
+        200, 250,
+        pl1_path=files["pl1"], pl2_path=files["pl2"],
+        bounds=(145, 290),
+    )
+    assert ok, message
+    assert pstate.read_power_limits(files["pl1"], files["pl2"]) == (200, 250)
+
+
+class _FakeResult:
+    def __init__(self, returncode=0, stderr="", stdout=""):
+        self.returncode = returncode
+        self.stderr = stderr
+        self.stdout = stdout
+
+
+def test_apply_power_limits_prefers_helper(pstate, tmp_path):
+    files = _limit_files(tmp_path)
+    helper = tmp_path / "power-limit"
+    helper.write_text("#!/bin/sh\n")
+    calls = []
+
+    def fake_run(argv):
+        calls.append(argv)
+        # The helper writes the limits on our behalf.
+        Path(files["pl1"]).write_text("105000000\n")
+        Path(files["pl2"]).write_text("125000000\n")
+        return _FakeResult()
+
+    ok, message = pstate.apply_power_limits(
+        105, 125,
+        pl1_path=files["pl1"], pl2_path=files["pl2"],
+        bounds=(145, 290), helper=str(helper), runner=fake_run,
+    )
+    assert ok, message
+    assert calls == [["sudo", "-n", str(helper), "105", "125"]]
+
+
+def test_apply_power_limits_reports_helper_failure(pstate, tmp_path):
+    files = _limit_files(tmp_path)
+    helper = tmp_path / "power-limit"
+    helper.write_text("#!/bin/sh\n")
+    # Make the direct sysfs fallback fail as well: the file is read-only here.
+    os.chmod(files["pl1"], 0o444)
+    os.chmod(files["pl2"], 0o444)
+
+    ok, message = pstate.apply_power_limits(
+        105, 125,
+        pl1_path=files["pl1"], pl2_path=files["pl2"],
+        bounds=(145, 290), helper=str(helper),
+        runner=lambda argv: _FakeResult(1, "sudo: a password is required"),
+    )
+    assert not ok
+    assert "password is required" in message

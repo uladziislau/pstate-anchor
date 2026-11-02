@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Set RAPL package power limits for the CPU package.
+#
+#   power-limit PL1_WATTS PL2_WATTS
+#
+# PL1 is the long-term limit, PL2 the short-term one, both in whole watts.
+# Invoked by P-State Anchor as `sudo -n /usr/local/libexec/pstate-anchor/power-limit …`,
+# so the argument surface must stay this narrow: two positive integers, nothing
+# else. The firmware ceiling (constraint_*_max_power_uw) is enforced here as
+# well, because PL1 often cannot be raised above its own maximum.
+#
+# Exit codes: 0 limits written, 2 usage error, 3 RAPL not available,
+#             4 value out of range, 5 write failed.
+set -euo pipefail
+
+BASE="${PSTATE_RAPL_BASE:-/sys/class/powercap/intel-rapl:0}"
+PL1="$BASE/constraint_0_power_limit_uw"
+PL2="$BASE/constraint_1_power_limit_uw"
+PL1_MAX="$BASE/constraint_0_max_power_uw"
+PL2_MAX="$BASE/constraint_1_max_power_uw"
+
+usage() {
+  echo "usage: $(basename "$0") PL1_WATTS PL2_WATTS" >&2
+  exit 2
+}
+
+[ "$#" -eq 2 ] || usage
+for value in "$1" "$2"; do
+  case "$value" in
+    ''|*[!0-9]*) usage ;;
+  esac
+done
+
+pl1_w="$1"
+pl2_w="$2"
+
+for path in "$PL1" "$PL2"; do
+  [ -w "$path" ] || { echo "error: $path is not writable" >&2; exit 3; }
+done
+
+read_uw() {
+  cat "$1" 2>/dev/null || true
+}
+
+# The firmware-reported maxima (constraint_*_max_power_uw) are a heuristic,
+# not a kernel-enforced limit: the kernel accepts higher values, so we do not
+# reject on them here. Enforcement is left to the kernel write below.
+if ! printf '%s\n' "$((pl1_w * 1000000))" > "$PL1"; then
+  echo "error: cannot write PL1" >&2
+  exit 5
+fi
+if ! printf '%s\n' "$((pl2_w * 1000000))" > "$PL2"; then
+  echo "error: cannot write PL2" >&2
+  exit 5
+fi
+
+printf 'PL1/PL2 set to %s/%s W\n' "$pl1_w" "$pl2_w"

@@ -85,6 +85,26 @@ python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' || {
 
 place 0755 "$SRC_DIR/pstate-anchor.py" "$BIN_DIR/pstate-anchor"
 
+# RAPL power-limit bridge: the tray calls it as `sudo -n <helper> PL1 PL2`.
+# Without the sudoers rule the menu shows the limits but cannot change them.
+HELPER="$PREFIX/libexec/pstate-anchor/power-limit"
+place 0755 "$SRC_DIR/contrib/power-limit" "$HELPER"
+SUDOERS_FILE="/etc/sudoers.d/pstate-anchor-power-limit"
+TARGET_USER="${SUDO_USER:-$(id -un)}"
+if [ "$(id -u)" -eq 0 ] && [ "$TARGET_USER" != "root" ]; then
+  if ! grep -qsF "$HELPER" "$SUDOERS_FILE" 2>/dev/null; then
+    printf '%s ALL=(root) NOPASSWD: %s\n' "$TARGET_USER" "$HELPER" \
+      > "$SUDOERS_FILE"
+    chmod 0440 "$SUDOERS_FILE"
+    if ! visudo -cf "$SUDOERS_FILE" >/dev/null 2>&1; then
+      echo "note: sudoers rule rejected, removing $SUDOERS_FILE" >&2
+      rm -f "$SUDOERS_FILE"
+    fi
+  fi
+else
+  echo "note: skipped $SUDOERS_FILE (needs root); power limits stay read-only" >&2
+fi
+
 if [ -f "$SRC_DIR/icons/pstate-anchor.svg" ]; then
   place 0644 "$SRC_DIR/icons/pstate-anchor.svg" \
     "$ICON_DIR/pstate-anchor.svg"
@@ -140,6 +160,7 @@ if [ "$WITH_GUARD" -eq 1 ]; then
 fi
 
 echo "installed: $BIN_DIR/pstate-anchor"
+echo "helper:    $HELPER"
 echo
 
 missing=()

@@ -6,6 +6,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions are calendar-based: `0.YYYY.MM.DD`. The leading zero marks the project
 as pre-1.0 — the CLI and the config file are stable, internal APIs are not.
 
+## [0.2026.11.02] - 2026-11-02
+
+### Added
+
+- **CPU power limits in the tray**: the menu shows the live `PL1/PL2` values and
+  offers Eco (105/125 W) and Stock (145/174 W) presets. The choice is stored in
+  the config and re-applied at start-up, because RAPL limits return to the
+  firmware default on every boot.
+- **CLI**: `--power-limit eco|stock|PL1/PL2`, accepting explicit watt pairs.
+- `contrib/power-limit` plus a sudoers rule installed by `install.sh`: the only
+  privileged surface is "write two integers", so no setuid binary and no
+  password prompt are needed.
+
+### Fixed
+
+- The firmware-reported maxima (`constraint_*_max_power_uw`) are a heuristic
+  (TDP / 2×TDP), not a kernel-enforced limit. The helper and `validate_power_limits`
+  no longer reject values above them; enforcement is left to the kernel write.
+
 ## [0.2026.10.27] - 2026-10-27
 
 First release prepared as a standalone, community-oriented project.

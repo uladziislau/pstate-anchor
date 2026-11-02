@@ -105,6 +105,8 @@ pstate-anchor --pstate 16             # hand control back to the driver
 pstate-anchor --governor schedutil    # set and pin the governor
 pstate-anchor --unpin-governor        # release the pin
 pstate-anchor --profile power-saver   # KDE profile, then exit
+pstate-anchor --power-limit eco       # RAPL PL1/PL2 preset, then exit
+pstate-anchor --power-limit 110/140   # explicit PL1/PL2 in watts, then exit
 pstate-anchor --version
 ```
 
@@ -191,6 +193,32 @@ of failing silently.
 | `autostart` | Mirrors the presence of the autostart file |
 | `governor` | Pinned governor (mirrors the pin file) |
 | `pstates` | Optional custom list of P-states for the menu |
+| `power_limit` | Last applied RAPL preset (`eco`, `stock`), re-applied on start-up |
+
+## CPU power limits (RAPL)
+
+The tray shows the current package limits as `PL1/PL2` and offers two presets
+in the menu:
+
+| Preset | PL1 (long term) | PL2 (short term) |
+|---|---|---|
+| Eco | 105 W | 125 W |
+| Stock | 145 W | 174 W |
+
+PL1 is the average power the package may draw over its window (here ≈ 1 s), PL2
+the ceiling allowed for a single short window (≈ 7.8 ms). Raising PL2 above PL1
+therefore changes only millisecond-scale bursts; sustained work is always bounded
+by PL1. On boards with a weak VRM a high PL2 buys nothing and stresses the power
+stage, so the preset above caps PL2 at the value the firmware advertises.
+
+The limits live under `/sys/class/powercap/intel-rapl:0`, which only root may
+write. `install.sh` therefore installs a tiny helper
+(`/usr/local/libexec/pstate-anchor/power-limit`) and a sudoers rule that allows
+its owner to run it without a password; the helper accepts exactly two whole
+watts. The firmware-reported maxima (`constraint_*_max_power_uw`) are a heuristic
+(TDP / 2×TDP), not a kernel-enforced limit — the kernel accepts higher values,
+and the helper leaves enforcement to it. Without the sudoers rule the limits are
+still displayed, but the menu cannot change them.
 
 ## P-states
 
@@ -224,6 +252,8 @@ manually only.
 - RAPL counters are Intel-only; on AMD the CPU-package row stays empty, the rest
   works.
 - Governor changes need root (see above); KDE profile changes do not.
+- RAPL power limits need the helper and its sudoers rule. The firmware-reported
+  maxima are a heuristic: the kernel may accept higher values.
 - Tray behaviour depends on the desktop: KDE and GNOME (with the extension) are
   verified, others as reported.
 
