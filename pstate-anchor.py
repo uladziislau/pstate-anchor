@@ -1168,7 +1168,13 @@ if HAVE_QT:
                 self._menu.triggered.connect(self._on_menu_trigger)
                 self._menu.aboutToShow.connect(self._on_menu_about_to_show)
                 self.setContextMenu(self._menu)
+                self._submenus = []
             else:
+                # Submenus are child widgets, not actions: clear() leaves
+                # them orphaned, so retire them explicitly before rebuilding.
+                for submenu in self._submenus:
+                    submenu.deleteLater()
+                self._submenus = []
                 self._menu.clear()
             self._profile_actions = []
             self._governor_actions = []
@@ -1176,54 +1182,54 @@ if HAVE_QT:
             self._sched_actions = []
             self._sched_mode_actions = []
 
-            self._section("Power Profile")
+            self._profile_menu = self._submenu("Profile")
             for profile_id, label in PROFILE_LABELS.items():
-                action = self._menu.addAction(label)
+                action = self._profile_menu.addAction(label)
                 action.setData(("profile", profile_id))
                 action.setCheckable(True)
                 self._profile_actions.append(action)
 
-            self._menu.addSeparator()
-            self._section("CPU Governor")
+            self._governor_menu = self._submenu("CPU Governor")
             for governor in selectable_governors():
-                action = self._menu.addAction(governor)
+                action = self._governor_menu.addAction(governor)
                 action.setData(("governor", governor))
                 action.setCheckable(True)
                 self._governor_actions.append(action)
-            unpin = self._menu.addAction("Follow system (unpin)")
+            unpin = self._governor_menu.addAction("Follow system (unpin)")
             unpin.setData(("unpin", None))
 
-            self._menu.addSeparator()
-            self._build_sched_ext_section()
-            self._menu.addSeparator()
-            self._section("GPU P-State")
+            self._sched_menu = self._submenu("sched_ext")
+            self._build_sched_ext_section(self._sched_menu)
+
+            self._gpu_menu = self._submenu("GPU P-State")
             for pstate, label in self._pstates.items():
                 text = f"P{pstate} — {label}" if label else f"P{pstate}"
-                action = self._menu.addAction(text)
+                action = self._gpu_menu.addAction(text)
                 action.setData(("pstate", pstate))
                 action.setCheckable(True)
                 self._pstate_actions.append(action)
 
-            self._menu.addSeparator()
-            self._section("CPU Power Limit")
+            self._limit_menu = self._submenu("Power Limit")
             self._power_actions = []
             for key, label in POWER_LIMIT_LABELS.items():
-                action = self._menu.addAction(label)
+                action = self._limit_menu.addAction(label)
                 action.setData(("power_limit", key))
                 action.setCheckable(True)
                 self._power_actions.append(action)
 
-            self._menu.addSeparator()
-            self._section("Status")
-            self._info_governor = self._info_item("CPU: —")
-            self._info_pin = self._info_item("Pin: —")
-            self._info_profile = self._info_item("Profile: —")
-            self._info_power = self._info_item("PL1/PL2: —")
-            self._info_gpu = self._info_item("GPU: — / —")
-            self._info_pkg = self._info_item("PKG: —")
-            self._info_dram = self._info_item("DRAM: —")
-            self._info_total = self._info_item("TOTAL: —")
-            self._info_schedext = self._info_item("sched_ext: —")
+            self._status_menu = self._submenu("Status")
+            self._section(self._status_menu, "CPU")
+            self._info_governor = self._info_item(self._status_menu, "CPU: —")
+            self._info_pin = self._info_item(self._status_menu, "Pin: —")
+            self._info_profile = self._info_item(self._status_menu, "Profile: —")
+            self._info_power = self._info_item(self._status_menu, "PL1/PL2: —")
+            self._info_schedext = self._info_item(self._status_menu, "sched_ext: —")
+            self._status_menu.addSeparator()
+            self._section(self._status_menu, "Power")
+            self._info_gpu = self._info_item(self._status_menu, "GPU: — / —")
+            self._info_pkg = self._info_item(self._status_menu, "PKG: —")
+            self._info_dram = self._info_item(self._status_menu, "DRAM: —")
+            self._info_total = self._info_item(self._status_menu, "TOTAL: —")
 
             self._menu.addSeparator()
             autostart = self._menu.addAction("Run at startup")
@@ -1239,15 +1245,21 @@ if HAVE_QT:
             # pstate checkmarks must be restored from the saved config.
             self._mark_active_pstate(str(self._cfg.get("pstate", PSTATE_AUTO)))
 
-        def _section(self, title: str) -> None:
-            header = self._menu.addAction(title)
+        def _submenu(self, title: str) -> QtWidgets.QMenu:
+            menu = self._menu.addMenu(title)
+            menu.triggered.connect(self._on_menu_trigger)
+            self._submenus.append(menu)
+            return menu
+
+        def _section(self, menu, title: str) -> None:
+            header = menu.addAction(title)
             header.setEnabled(False)
             font = header.font()
             font.setBold(True)
             header.setFont(font)
 
-        def _info_item(self, text: str):
-            action = self._menu.addAction(text)
+        def _info_item(self, menu, text: str):
+            action = menu.addAction(text)
             action.setEnabled(False)
             return action
 
@@ -1261,30 +1273,30 @@ if HAVE_QT:
                 tuple(status.get("modes") or ()),
             )
 
-        def _build_sched_ext_section(self) -> None:
+        def _build_sched_ext_section(self, menu) -> None:
             status = self._sched_ext
-            self._section("sched_ext")
             if not status.get("available"):
-                self._info_item("not available (install scx-scheds)")
+                unavailable = menu.addAction("not available (install scx-scheds)")
+                unavailable.setEnabled(False)
                 return
             schedulers = status.get("schedulers") or []
             for name in schedulers:
                 display = name if name.startswith("scx_") else f"scx_{name}"
-                action = self._menu.addAction(display)
+                action = menu.addAction(display)
                 action.setData(("sched_ext", name))
                 action.setCheckable(True)
                 self._sched_actions.append(action)
-            default_action = self._menu.addAction("Default (kernel EEVDF)")
+            default_action = menu.addAction("Default (kernel EEVDF)")
             default_action.setData(("sched_ext", "default"))
             default_action.setCheckable(True)
             self._sched_actions.append(default_action)
 
             modes = status.get("modes") or []
             if status.get("running") and modes:
-                self._menu.addSeparator()
-                self._section("sched_ext Mode")
+                menu.addSeparator()
+                self._section(menu, "Mode")
                 for mode_name in modes:
-                    action = self._menu.addAction(mode_name)
+                    action = menu.addAction(mode_name)
                     action.setData(("sched_ext_mode", mode_name))
                     action.setCheckable(True)
                     self._sched_mode_actions.append(action)
@@ -1493,6 +1505,7 @@ if HAVE_QT:
             limits = read_power_limits()
             if limits is None:
                 self._info_power.setText("PL1/PL2: — (RAPL limits absent)")
+                limit_title = "—"
             else:
                 pl1_w, pl2_w = limits
                 bounds = power_limit_bounds()
@@ -1503,6 +1516,17 @@ if HAVE_QT:
                 for action in self._power_actions:
                     preset = POWER_LIMIT_PRESETS.get(action.data()[1])
                     action.setChecked(preset == limits)
+                preset_key = next(
+                    (
+                        key
+                        for key, preset in POWER_LIMIT_PRESETS.items()
+                        if preset == limits
+                    ),
+                    None,
+                )
+                limit_title = POWER_LIMIT_LABELS.get(
+                    preset_key, f"{pl1_w}/{pl2_w} W"
+                )
 
             power = self._power
             gpu_text = f"GPU: {power.gpu_now:.1f} W / avg {power.gpu_avg:.1f} W"
@@ -1526,6 +1550,18 @@ if HAVE_QT:
                 sched_text = "default"
             self._info_schedext.setText(f"sched_ext: {sched_text}")
             self._update_sched_checks()
+
+            # Top-level submenu titles carry the live value of each domain,
+            # so the collapsed menu already answers "what is active now".
+            self._profile_menu.setTitle(
+                f"Profile: {PROFILE_LABELS.get(profile, profile)}"
+            )
+            self._governor_menu.setTitle(
+                f"Governor: {governor}" + (" 📌" if self._pin else "")
+            )
+            self._sched_menu.setTitle(f"sched_ext: {sched_text}")
+            self._gpu_menu.setTitle(f"GPU: {self._current_label}")
+            self._limit_menu.setTitle(f"Power Limit: {limit_title}")
 
             self.setToolTip(
                 f"P-State Anchor {__version__}\n"

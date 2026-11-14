@@ -28,12 +28,16 @@ costs in watts.
 
 ## Features
 
-| Menu section | What it does |
+The tray menu is grouped into submenus whose titles carry the live value of
+each domain, so the collapsed menu already answers "what is active now":
+
+| Submenu | What it does |
 |---|---|
-| **Power Profile** | Switches the KDE profile (`power-saver` / `balanced` / `performance`) over D-Bus PowerProfiles. It does **not** touch the P-state or the governor: those stay under your explicit control (menu or pin) |
-| **CPU Governor** | List comes from `scaling_available_governors` (includes `schedutil`); the chosen governor is **pinned** so automation stops reverting it |
-| **sched_ext** | Linux sched_ext BPF schedulers via `scxctl`: pick a scheduler (`scx_mlfq`, `scx_rusty`, …) or its configured mode, or return to the kernel default (EEVDF). Status line shows the live scheduler · mode |
-| **GPU P-State** | P0 / P2 / P3 / P5 / P8 plus Auto (driver control); the choice survives reboots |
+| **Profile: …** | Switches the KDE profile (`power-saver` / `balanced` / `performance`) over D-Bus PowerProfiles. It does **not** touch the P-state or the governor: those stay under your explicit control (menu or pin) |
+| **Governor: …** | CPU governor list from `scaling_available_governors` (includes `schedutil`); the chosen governor is **pinned** so automation stops reverting it. "Follow system (unpin)" releases the pin |
+| **sched_ext: …** | Linux sched_ext BPF schedulers via `scxctl`: pick a scheduler (`scx_mlfq`, `scx_rusty`, …) or its configured mode, or return to the kernel default (EEVDF). Title shows the live `scheduler · mode` |
+| **GPU: …** | P0 / P2 / P3 / P5 / P8 plus Auto (driver control); the choice survives reboots |
+| **Power Limit: …** | RAPL PL1/PL2 presets (`Stock`, `Eco`) applied via the root helper; the title shows the active preset or the raw watt values |
 | **Status** | Current governor, active pin, profile, P-state, GPU power, CPU package and DRAM — instant and 1-minute average |
 | **Run at startup** | Autostart with the desktop (the `.desktop` file is generated) |
 

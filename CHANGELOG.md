@@ -21,6 +21,16 @@ as pre-1.0 — the CLI and the config file are stable, internal APIs are not.
   scheduler, mode, schedulers, modes) and the `scxctl` dependency path.
 - `install.sh` reports missing `scxctl` as an optional dependency.
 
+### Changed
+
+- **Tray menu grouped into submenus**: the flat ~45-item list is now six
+  submenus — Profile, CPU Governor, sched_ext, GPU P-State, Power Limit and
+  Status — plus Run at startup / Refresh / Quit. Each submenu title carries
+  the live value of its domain (`Governor: schedutil`, `sched_ext: MLFQ ·
+  Auto`, `Power Limit: Eco 105/125 W`), so the collapsed menu already shows
+  what is active. Status moved into its own submenu, split into CPU and
+  Power groups.
+
 ### Notes
 
 - sched_ext control is delegated to `scx_loader`/`scxctl` (D-Bus); persistence
