@@ -169,6 +169,7 @@ command -v nvidia-pstate >/dev/null 2>&1 || missing+=("nvidia-pstate (pip instal
 python3 -c 'import PyQt6' 2>/dev/null || missing+=("PyQt6 (dnf install python3-pyqt6)")
 command -v gdbus >/dev/null 2>&1 || missing+=("gdbus (glib2, for KDE Power Profiles)")
 command -v cpupower >/dev/null 2>&1 || missing+=("cpupower (kernel-tools)")
+command -v scxctl >/dev/null 2>&1 || missing+=("scxctl (scx-scheds, optional sched_ext control)")
 
 if [ ${#missing[@]} -gt 0 ]; then
   echo "optional dependencies not found:"

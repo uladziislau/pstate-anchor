@@ -32,6 +32,7 @@ costs in watts.
 |---|---|
 | **Power Profile** | Switches the KDE profile (`power-saver` / `balanced` / `performance`) over D-Bus PowerProfiles. It does **not** touch the P-state or the governor: those stay under your explicit control (menu or pin) |
 | **CPU Governor** | List comes from `scaling_available_governors` (includes `schedutil`); the chosen governor is **pinned** so automation stops reverting it |
+| **sched_ext** | Linux sched_ext BPF schedulers via `scxctl`: pick a scheduler (`scx_mlfq`, `scx_rusty`, …) or its configured mode, or return to the kernel default (EEVDF). Status line shows the live scheduler · mode |
 | **GPU P-State** | P0 / P2 / P3 / P5 / P8 plus Auto (driver control); the choice survives reboots |
 | **Status** | Current governor, active pin, profile, P-state, GPU power, CPU package and DRAM — instant and 1-minute average |
 | **Run at startup** | Autostart with the desktop (the `.desktop` file is generated) |
@@ -47,6 +48,7 @@ assets); the tooltip carries the full power summary.
   P-state control (MIT, install from PyPI)
 - PyQt6 — tray only; `--dump-state` and CLI control work without it
 - `gdbus` (glib2) for KDE power profiles; `cpupower` for governor switching
+- `scxctl` (`scx-scheds` package) — optional; the sched_ext section hides itself when absent
 
 ### Installing dependencies
 
@@ -107,6 +109,9 @@ pstate-anchor --unpin-governor        # release the pin
 pstate-anchor --profile power-saver   # KDE profile, then exit
 pstate-anchor --power-limit eco       # RAPL PL1/PL2 preset, then exit
 pstate-anchor --power-limit 110/140   # explicit PL1/PL2 in watts, then exit
+pstate-anchor --sched-ext mlfq        # switch sched_ext scheduler, then exit
+pstate-anchor --sched-ext default     # stop sched_ext → kernel EEVDF
+pstate-anchor --sched-ext-mode gaming # switch mode of the running scheduler
 pstate-anchor --version
 ```
 

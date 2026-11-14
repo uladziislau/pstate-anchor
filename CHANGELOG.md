@@ -6,6 +6,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions are calendar-based: `0.YYYY.MM.DD`. The leading zero marks the project
 as pre-1.0 — the CLI and the config file are stable, internal APIs are not.
 
+## [0.2026.11.15] - 2026-11-15
+
+### Added
+
+- **sched_ext section in the tray**: lists the schedulers known to `scxctl`
+  (`scx_mlfq`, `scx_rusty`, `scx_eevdf`, …), offers "Default (kernel EEVDF)"
+  via `scxctl stop`, and — while a BPF scheduler runs — its configured modes
+  (`Auto`, `Gaming`, `PowerSave`, `LowLatency`, `Server`). The Status section
+  shows the live `scheduler · mode`; the menu refreshes on open and rebuilds
+  itself when the scheduler or mode set changes.
+- **CLI**: `--sched-ext <name|default|off>` and `--sched-ext-mode <mode>`.
+- `--dump-state` now reports a `sched_ext` block (available, running,
+  scheduler, mode, schedulers, modes) and the `scxctl` dependency path.
+- `install.sh` reports missing `scxctl` as an optional dependency.
+
+### Notes
+
+- sched_ext control is delegated to `scx_loader`/`scxctl` (D-Bus); persistence
+  across reboots stays with scx_loader's own configuration — the tray does
+  not re-apply a scheduler at start-up.
+- Without `scxctl` or a sched_ext-capable kernel the section degrades to a
+  single "not available" line.
+
 ## [0.2026.11.02] - 2026-11-02
 
 ### Added

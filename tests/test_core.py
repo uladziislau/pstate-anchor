@@ -674,3 +674,123 @@ def test_apply_power_limits_reports_helper_failure(pstate, tmp_path):
     )
     assert not ok
     assert "password is required" in message
+
+
+# ── sched_ext (scxctl) ────────────────────────────────────
+
+def test_parse_scx_get_running(pstate):
+    parsed = pstate.parse_scx_get("running MLFQ in Auto mode\n")
+    assert parsed == {"running": True, "scheduler": "MLFQ", "mode": "Auto"}
+
+
+def test_parse_scx_get_idle(pstate):
+    parsed = pstate.parse_scx_get(
+        "no scx scheduler running, use 'scxctl start --sched mlfq'"
+    )
+    assert parsed == {"running": False, "scheduler": None, "mode": None}
+
+
+def test_parse_scx_get_garbage(pstate):
+    assert pstate.parse_scx_get("") == {
+        "running": False, "scheduler": None, "mode": None,
+    }
+
+
+def test_parse_scx_list(pstate):
+    raw = 'supported schedulers: ["mlfq", "eevdf", "rusty"]\n'
+    assert pstate.parse_scx_list(raw) == ["mlfq", "eevdf", "rusty"]
+
+
+def test_parse_scx_list_empty(pstate):
+    assert pstate.parse_scx_list("no schedulers") == []
+
+
+def test_parse_scx_modes(pstate):
+    raw = (
+        "configuration for MLFQ:\n"
+        "  Auto: (uses MLFQ's own defaults)\n"
+        "  Gaming: (not configured, uses MLFQ's own defaults)\n"
+        "(unlisted modes run with MLFQ's own defaults)\n"
+    )
+    # Only the header line carries the configured list.
+    header = "modes configured for MLFQ: [Auto]\n" + raw
+    assert pstate.parse_scx_modes(header) == ["Auto"]
+
+
+class _ScxFake:
+    """Fake scxctl: routes canned replies by subcommand, records calls."""
+
+    def __init__(self, replies=None, fail_on=None):
+        self.replies = replies or {}
+        self.fail_on = fail_on or set()
+        self.calls = []
+
+    def __call__(self, argv):
+        self.calls.append(list(argv))
+        key = tuple(argv[1:])
+        if any(marker in key for marker in self.fail_on):
+            return _FakeResult(1, "boom")
+        for marker, result in self.replies.items():
+            if marker in key or marker == " ".join(key):
+                return _FakeResult(0, result)
+        if "get" in key:
+            return _FakeResult(0, "running MLFQ in Auto mode")
+        if "list" in key:
+            return _FakeResult(
+                0, 'supported schedulers: ["mlfq", "eevdf", "rusty"]'
+            )
+        if "modes" in key:
+            return _FakeResult(0, "modes configured for MLFQ: [Auto, Gaming]")
+        return _FakeResult(0, "switched")
+
+
+def _patch_scxctl(pstate, monkeypatch, fake):
+    monkeypatch.setattr(pstate, "sched_ext_available", lambda *a, **k: True)
+    monkeypatch.setattr(
+        pstate, "_binary", lambda name: "/usr/bin/scxctl" if name == "scxctl" else None
+    )
+    return fake
+
+
+def test_sched_ext_status_running(pstate, monkeypatch):
+    fake = _patch_scxctl(pstate, monkeypatch, _ScxFake())
+    status = pstate.sched_ext_status(runner=fake)
+    assert status["available"] is True
+    assert status["running"] is True
+    assert status["scheduler"] == "MLFQ"
+    assert status["mode"] == "Auto"
+    assert status["schedulers"] == ["mlfq", "eevdf", "rusty"]
+    assert status["modes"] == ["Auto", "Gaming"]
+
+
+def test_sched_ext_status_unavailable(pstate, monkeypatch):
+    monkeypatch.setattr(pstate, "sched_ext_available", lambda *a, **k: False)
+    status = pstate.sched_ext_status()
+    assert status["available"] is False
+    assert status["running"] is False
+
+
+def test_apply_sched_ext_switch_scheduler(pstate, monkeypatch):
+    fake = _patch_scxctl(pstate, monkeypatch, _ScxFake())
+    ok, message = pstate.apply_sched_ext(sched="rusty", runner=fake)
+    assert ok, message
+    assert fake.calls[-1] == ["/usr/bin/scxctl", "switch", "--sched", "rusty"]
+
+
+def test_apply_sched_ext_mode_and_stop(pstate, monkeypatch):
+    fake = _patch_scxctl(pstate, monkeypatch, _ScxFake())
+    ok, _ = pstate.apply_sched_ext(mode="gaming", runner=fake)
+    assert ok
+    assert fake.calls[-1] == ["/usr/bin/scxctl", "switch", "--mode", "gaming"]
+    ok, _ = pstate.apply_sched_ext(stop=True, runner=fake)
+    assert ok
+    assert fake.calls[-1] == ["/usr/bin/scxctl", "stop"]
+
+
+def test_apply_sched_ext_failure(pstate, monkeypatch):
+    fake = _patch_scxctl(
+        pstate, monkeypatch, _ScxFake(fail_on={"switch"})
+    )
+    ok, message = pstate.apply_sched_ext(sched="mlfq", runner=fake)
+    assert not ok
+    assert message

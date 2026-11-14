@@ -15,6 +15,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -22,7 +23,7 @@ import time
 from collections import deque
 from statistics import mean
 
-__version__ = "0.2026.11.02"
+__version__ = "0.2026.11.15"
 
 # ── configuration surface ─────────────────────────────────
 # Every path below can be overridden through the environment. That keeps the
@@ -679,6 +680,161 @@ def apply_power_limits(
     return False, "; ".join(e for e in errors if e)
 
 
+# ── sched_ext (scx_loader / scxctl) ───────────────────────
+# The kernel's sched_ext lets user-space BPF schedulers replace the default
+# EEVDF. scx_loader (D-Bus activated) owns the lifecycle; scxctl is the CLI
+# client. We only reflect and switch — persistence across reboots belongs to
+# scx_loader's own configuration, not to this tray.
+
+SCHED_EXT_STATE_PATH = os.environ.get(
+    "PSTATE_SCHED_EXT_STATE", "/sys/kernel/sched_ext/state"
+)
+
+
+def sched_ext_available(
+    state_path: str = SCHED_EXT_STATE_PATH, which=None
+) -> bool:
+    """True when the kernel exposes sched_ext or scxctl is installed."""
+    if os.path.exists(os.path.dirname(state_path)):
+        return True
+    finder = which or _binary
+    return finder("scxctl") is not None
+
+
+def _scxctl(
+    args: list[str], runner=None, timeout: int = 15
+) -> tuple[int, str]:
+    """Run `scxctl <args>`; returns (exit_code, combined_output)."""
+    binary = _binary("scxctl")
+    if binary is None:
+        return 127, "scxctl not found"
+    run = runner or (
+        lambda argv: subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout, check=False
+        )
+    )
+    try:
+        result = run([binary, *args])
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 1, str(exc)
+    output = ((result.stdout or "") + (result.stderr or "")).strip()
+    return result.returncode, output
+
+
+def parse_scx_get(raw: str) -> dict:
+    """`scxctl get` → {"running": bool, "scheduler": str|None, "mode": str|None}.
+
+    Live output is one line: `running MLFQ in Auto mode` or
+    `no scx scheduler running, use '...'`.
+    """
+    match = re.search(
+        r"running\s+(\S+)\s+in\s+(.+?)\s+mode\b", raw, re.IGNORECASE
+    )
+    if match is None:
+        return {"running": False, "scheduler": None, "mode": None}
+    return {
+        "running": True,
+        "scheduler": match.group(1),
+        "mode": match.group(2),
+    }
+
+
+def parse_scx_list(raw: str) -> list[str]:
+    """`scxctl list` → ['beerland', 'bpfland', ...]."""
+    start = raw.find("[")
+    end = raw.rfind("]")
+    if start == -1 or end <= start:
+        return []
+    try:
+        values = json.loads(raw[start : end + 1])
+    except json.JSONDecodeError:
+        return []
+    return [str(item) for item in values] if isinstance(values, list) else []
+
+
+def parse_scx_modes(raw: str) -> list[str]:
+    """`scxctl modes --sched X` → ['Auto', 'Gaming', ...] on the first line.
+
+    Unlike `scxctl list` (a JSON array), the modes line prints bare names:
+    `modes configured for MLFQ: [Auto, Gaming]`.
+    """
+    first = raw.splitlines()[0] if raw.splitlines() else ""
+    start = first.find("[")
+    end = first.rfind("]")
+    if start == -1 or end <= start:
+        return []
+    inner = first[start + 1 : end]
+    return [
+        part.strip().strip('"').strip("'")
+        for part in inner.split(",")
+        if part.strip()
+    ]
+
+
+def sched_ext_status(runner=None) -> dict:
+    """Live sched_ext snapshot for --dump-state and the tray.
+
+    Keys: available, running, scheduler, mode, schedulers, modes, error.
+    Never raises: a missing scx_loader or a D-Bus failure degrades to
+    ``available``/``running`` False with the message in ``error``.
+    """
+    if not sched_ext_available():
+        return {"available": False, "running": False, "error": "sched_ext absent"}
+
+    code, out = _scxctl(["get"], runner=runner)
+    if code != 0:
+        return {
+            "available": True,
+            "running": False,
+            "error": out or f"scxctl get exit {code}",
+        }
+    parsed = parse_scx_get(out)
+
+    code, out = _scxctl(["list"], runner=runner)
+    schedulers = parse_scx_list(out) if code == 0 else []
+
+    modes: list[str] = []
+    if parsed["running"] and parsed["scheduler"]:
+        # `scxctl get` prints the display name (MLFQ); `modes --sched` wants
+        # the binary name (scx_mlfq or plain mlfq). Try both spellings.
+        name = parsed["scheduler"]
+        for candidate in (name.lower(), f"scx_{name.lower()}"):
+            code, out = _scxctl(["modes", "--sched", candidate], runner=runner)
+            if code == 0:
+                modes = parse_scx_modes(out)
+                break
+
+    return {
+        "available": True,
+        "running": parsed["running"],
+        "scheduler": parsed["scheduler"],
+        "mode": parsed["mode"],
+        "schedulers": schedulers,
+        "modes": modes,
+        "error": None,
+    }
+
+
+def apply_sched_ext(
+    sched: str | None = None,
+    mode: str | None = None,
+    stop: bool = False,
+    runner=None,
+) -> tuple[bool, str]:
+    """Switch scheduler/mode via scxctl. Exactly one of sched/mode/stop."""
+    if stop:
+        args = ["stop"]
+    elif sched:
+        args = ["switch", "--sched", sched]
+    elif mode:
+        args = ["switch", "--mode", mode]
+    else:
+        return False, "nothing to do: pass sched, mode or stop"
+    code, out = _scxctl(args, runner=runner)
+    if code != 0:
+        return False, out or f"scxctl exit {code}"
+    return True, out or "ok"
+
 
 # ── power monitor (rolling 1-minute average) ──────────────
 
@@ -814,12 +970,14 @@ def collect_state() -> dict:
             "power_w": round(gpu_power, 2),
         },
         "rapl_readable": rapl is not None,
+        "sched_ext": sched_ext_status(),
         "dependencies": {
             "nvidia-smi": smi,
             "nvidia-pstate": _binary("nvidia-pstate"),
             "cpupower": _binary("cpupower"),
             "gdbus": _binary("gdbus"),
             "PyQt6": _pyqt_available(),
+            "scxctl": _binary("scxctl"),
         },
     }
 
@@ -951,11 +1109,22 @@ if HAVE_QT:
             self._pstate_runner.finished.connect(lambda _: self._refresh())
             self._pstate_runner.failed.connect(self._on_pstate_failure)
 
+            self._sched_runner = CommandRunner()
+            self._sched_runner.finished.connect(self._on_sched_ext_done)
+            self._sched_runner.failed.connect(self._on_sched_ext_fail)
+
             # Read the KDE profile asynchronously: a blocking gdbus call in the
             # refresh loop could stall the tray for up to its 5 s timeout.
             self._profile_runner = CommandRunner()
             self._profile_runner.finished.connect(self._on_profile_ok)
             self._gdbus = shutil.which("gdbus")
+
+            # sched_ext state is read synchronously once: three short scxctl
+            # calls (~100 ms) at startup, then refreshed on menu open and
+            # after every switch — never inside the 2 s power loop.
+            self._menu = None
+            self._sched_ext = sched_ext_status()
+            self._sched_sig = self._sched_signature(self._sched_ext)
 
             self._build_menu()
 
@@ -994,10 +1163,18 @@ if HAVE_QT:
         # ── menu ──────────────────────────────────────────────
 
         def _build_menu(self) -> None:
-            self._menu = QtWidgets.QMenu()
+            if self._menu is None:
+                self._menu = QtWidgets.QMenu()
+                self._menu.triggered.connect(self._on_menu_trigger)
+                self._menu.aboutToShow.connect(self._on_menu_about_to_show)
+                self.setContextMenu(self._menu)
+            else:
+                self._menu.clear()
             self._profile_actions = []
             self._governor_actions = []
             self._pstate_actions = []
+            self._sched_actions = []
+            self._sched_mode_actions = []
 
             self._section("Power Profile")
             for profile_id, label in PROFILE_LABELS.items():
@@ -1016,6 +1193,8 @@ if HAVE_QT:
             unpin = self._menu.addAction("Follow system (unpin)")
             unpin.setData(("unpin", None))
 
+            self._menu.addSeparator()
+            self._build_sched_ext_section()
             self._menu.addSeparator()
             self._section("GPU P-State")
             for pstate, label in self._pstates.items():
@@ -1044,6 +1223,7 @@ if HAVE_QT:
             self._info_pkg = self._info_item("PKG: —")
             self._info_dram = self._info_item("DRAM: —")
             self._info_total = self._info_item("TOTAL: —")
+            self._info_schedext = self._info_item("sched_ext: —")
 
             self._menu.addSeparator()
             autostart = self._menu.addAction("Run at startup")
@@ -1055,8 +1235,9 @@ if HAVE_QT:
             self._menu.addAction("Refresh", self._refresh)
             self._menu.addAction("Quit", QtWidgets.QApplication.quit)
 
-            self._menu.triggered.connect(self._on_menu_trigger)
-            self.setContextMenu(self._menu)
+            # Rebuilds reuse the same QMenu (signals stay connected once), so
+            # pstate checkmarks must be restored from the saved config.
+            self._mark_active_pstate(str(self._cfg.get("pstate", PSTATE_AUTO)))
 
         def _section(self, title: str) -> None:
             header = self._menu.addAction(title)
@@ -1069,6 +1250,106 @@ if HAVE_QT:
             action = self._menu.addAction(text)
             action.setEnabled(False)
             return action
+
+        # ── sched_ext ────────────────────────────────────────
+
+        @staticmethod
+        def _sched_signature(status: dict) -> tuple:
+            return (
+                status.get("scheduler"),
+                status.get("mode"),
+                tuple(status.get("modes") or ()),
+            )
+
+        def _build_sched_ext_section(self) -> None:
+            status = self._sched_ext
+            self._section("sched_ext")
+            if not status.get("available"):
+                self._info_item("not available (install scx-scheds)")
+                return
+            schedulers = status.get("schedulers") or []
+            for name in schedulers:
+                display = name if name.startswith("scx_") else f"scx_{name}"
+                action = self._menu.addAction(display)
+                action.setData(("sched_ext", name))
+                action.setCheckable(True)
+                self._sched_actions.append(action)
+            default_action = self._menu.addAction("Default (kernel EEVDF)")
+            default_action.setData(("sched_ext", "default"))
+            default_action.setCheckable(True)
+            self._sched_actions.append(default_action)
+
+            modes = status.get("modes") or []
+            if status.get("running") and modes:
+                self._menu.addSeparator()
+                self._section("sched_ext Mode")
+                for mode_name in modes:
+                    action = self._menu.addAction(mode_name)
+                    action.setData(("sched_ext_mode", mode_name))
+                    action.setCheckable(True)
+                    self._sched_mode_actions.append(action)
+
+        def _refresh_sched_ext(self, rebuild: bool = False) -> None:
+            """Re-read scxctl state; rebuild the menu when sched/modes changed."""
+            status = sched_ext_status()
+            self._sched_ext = status
+            signature = self._sched_signature(status)
+            if rebuild or signature != self._sched_sig:
+                self._sched_sig = signature
+                self._build_menu()
+                self._update_display()
+            else:
+                self._update_sched_checks()
+
+        def _on_menu_about_to_show(self) -> None:
+            self._refresh_sched_ext()
+
+        def _update_sched_checks(self) -> None:
+            status = self._sched_ext
+            scheduler = (status.get("scheduler") or "").lower()
+            running = bool(status.get("running"))
+            for action in self._sched_actions:
+                name = action.data()[1]
+                if name == "default":
+                    action.setChecked(not running)
+                else:
+                    action.setChecked(
+                        running and name.lower() == scheduler
+                    )
+            mode = (status.get("mode") or "").lower()
+            for action in self._sched_mode_actions:
+                action.setChecked(
+                    bool(mode) and action.data()[1].lower() == mode
+                )
+
+        def _apply_sched_ext(self, value: str) -> None:
+            binary = _binary("scxctl")
+            if binary is None:
+                self._notify(
+                    "sched_ext", "scxctl not found (install scx-scheds)", False
+                )
+                return
+            if value == "default":
+                self._sched_runner.run([binary, "stop"])
+            else:
+                self._sched_runner.run([binary, "switch", "--sched", value])
+
+        def _apply_sched_ext_mode(self, mode: str) -> None:
+            binary = _binary("scxctl")
+            if binary is None:
+                self._notify(
+                    "sched_ext", "scxctl not found (install scx-scheds)", False
+                )
+                return
+            self._sched_runner.run([binary, "switch", "--mode", mode])
+
+        def _on_sched_ext_done(self, output: str) -> None:
+            self._refresh_sched_ext(rebuild=True)
+            self._notify("sched_ext", output or "done", True)
+
+        def _on_sched_ext_fail(self, message: str) -> None:
+            self._notify("sched_ext", message, False)
+            self._refresh_sched_ext()
 
         # ── actions ───────────────────────────────────────────
 
@@ -1088,6 +1369,10 @@ if HAVE_QT:
                 self._set_pstate(value)
             elif kind == "power_limit":
                 self._set_power_limit(value)
+            elif kind == "sched_ext":
+                self._apply_sched_ext(value)
+            elif kind == "sched_ext_mode":
+                self._apply_sched_ext_mode(value)
 
         def _pin_governor(self, governor: str) -> None:
             ok, message = apply_governor(governor)
@@ -1232,6 +1517,16 @@ if HAVE_QT:
                 f"TOTAL: {power.total_now:.1f} W / avg {power.total_avg:.1f} W"
             )
 
+            se = self._sched_ext
+            if not se.get("available"):
+                sched_text = "unavailable"
+            elif se.get("running"):
+                sched_text = f"{se.get('scheduler')} · {se.get('mode')}"
+            else:
+                sched_text = "default"
+            self._info_schedext.setText(f"sched_ext: {sched_text}")
+            self._update_sched_checks()
+
             self.setToolTip(
                 f"P-State Anchor {__version__}\n"
                 f"GPU P{self._current_label}  {power.gpu_now:.1f} W\n"
@@ -1357,6 +1652,17 @@ def main(argv: list[str] | None = None) -> int:
         "--autostart", choices=("on", "off"),
         help="enable or disable autostart and exit",
     )
+    parser.add_argument(
+        "--sched-ext", metavar="SCHED",
+        help=(
+            "switch sched_ext scheduler and exit: name from `scxctl list`, "
+            "or 'default'/'off' to stop sched_ext (kernel EEVDF)"
+        ),
+    )
+    parser.add_argument(
+        "--sched-ext-mode", metavar="MODE",
+        help="switch the mode of the running sched_ext scheduler and exit",
+    )
     args = parser.parse_args(argv)
 
     if args.dump_state:
@@ -1424,6 +1730,20 @@ def main(argv: list[str] | None = None) -> int:
         save_config(cfg)
         print(message, file=sys.stderr)
         return 0
+
+    if args.sched_ext is not None:
+        value = args.sched_ext.strip().lower()
+        if value in ("default", "off", "none", "stop"):
+            ok, message = apply_sched_ext(stop=True)
+        else:
+            ok, message = apply_sched_ext(sched=value)
+        print(message, file=sys.stderr)
+        return 0 if ok else 1
+
+    if args.sched_ext_mode is not None:
+        ok, message = apply_sched_ext(mode=args.sched_ext_mode)
+        print(message, file=sys.stderr)
+        return 0 if ok else 1
 
     if args.profile is not None:
         ok, message = set_power_profile(args.profile)

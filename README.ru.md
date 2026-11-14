@@ -32,6 +32,7 @@ GSP-прошивка NVIDIA может держать GPU в P0 даже на с
 |---|---|
 | **Power Profile** | Переключение профиля KDE (`power-saver` / `balanced` / `performance`) через D-Bus PowerProfiles. P-state и governor профиль **не** трогает: они остаются под вашим явным управлением (меню или пин) |
 | **CPU Governor** | Список берётся из `scaling_available_governors` (включая `schedutil`); выбранный governor **закрепляется**, чтобы автоматика его не откатывала |
+| **sched_ext** | BPF-планировщики Linux sched_ext через `scxctl`: выбор планировщика (`scx_mlfq`, `scx_rusty`, …) или его режима, возврат к ядерному EEVDF. В Status — текущий планировщик · режим |
 | **GPU P-State** | P0 / P2 / P3 / P5 / P8 и Auto (управление драйвером), сохраняется между перезагрузками |
 | **Status** | Текущий governor, активный пин, профиль, P-state, мощность GPU, CPU package и DRAM — мгновенно и среднее за минуту |
 | **Run at startup** | Автозапуск вместе с рабочим столом (файл `.desktop` создаётся сам) |
@@ -47,6 +48,7 @@ GSP-прошивка NVIDIA может держать GPU в P0 даже на с
   управления P-состояниями (MIT, ставится через pip)
 - PyQt6 — только для трея; `--dump-state` и управление из CLI работают без него
 - `gdbus` (glib2) — для профилей питания KDE; `cpupower` — для смены governor
+- `scxctl` (пакет `scx-scheds`) — опционально; без него раздел sched_ext скрывается
 
 ### Установка зависимостей
 
@@ -105,6 +107,9 @@ pstate-anchor --pstate 16             # вернуть управление др
 pstate-anchor --governor schedutil    # поставить и закрепить governor
 pstate-anchor --unpin-governor        # снять закрепление
 pstate-anchor --profile power-saver   # профиль KDE и выйти
+pstate-anchor --sched-ext mlfq        # переключить планировщик sched_ext
+pstate-anchor --sched-ext default     # остановить sched_ext → EEVDF ядра
+pstate-anchor --sched-ext-mode gaming # переключить режим текущего планировщика
 pstate-anchor --version
 ```
 
