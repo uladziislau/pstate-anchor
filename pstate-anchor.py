@@ -66,14 +66,34 @@ DEFAULT_PSTATES = {
 #: RAPL package power limits (PL1 long term, PL2 short term), in watts.
 #: `stock` is the firmware default of a Xeon E5 v3 desktop board; `eco` is the
 #: measured sweet spot (≈19 % less energy per operation, ≈7 % less throughput).
-#: Both are clamped against constraint_*_max_power_uw before writing.
+#: Pairs below 80 W trade all-core clocks for lower package power: they do not
+#: touch single-thread boost (≈20–30 W of package power), so interactive work
+#: stays at full clocks. Ordered by descending PL1 — that is the menu order.
+#: The kernel accepts any value; the firmware maxima are a heuristic, not a
+#: kernel-enforced limit.
 POWER_LIMIT_PRESETS = {
     "stock": (145, 174),
     "eco": (105, 125),
+    "80_100": (80, 100),
+    "70_90": (70, 90),
+    "60_80": (60, 80),
+    "50_70": (50, 70),
+    "40_70": (40, 70),
+    "40_60": (40, 60),
+    "30_70": (30, 70),
+    "30_50": (30, 50),
 }
 POWER_LIMIT_LABELS = {
     "stock": "Stock 145/174 W",
     "eco": "Eco 105/125 W",
+    "80_100": "80/100 W",
+    "70_90": "70/90 W",
+    "60_80": "60/80 W",
+    "50_70": "50/70 W",
+    "40_70": "40/70 W",
+    "40_60": "40/60 W",
+    "30_70": "30/70 W",
+    "30_50": "30/50 W",
 }
 
 CONFIG_FILE = os.environ.get(

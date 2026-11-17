@@ -202,23 +202,38 @@ of failing silently.
 | `autostart` | Mirrors the presence of the autostart file |
 | `governor` | Pinned governor (mirrors the pin file) |
 | `pstates` | Optional custom list of P-states for the menu |
-| `power_limit` | Last applied RAPL preset (`eco`, `stock`), re-applied on start-up |
+| `power_limit` | Last applied RAPL preset key (see below), re-applied on start-up |
 
 ## CPU power limits (RAPL)
 
-The tray shows the current package limits as `PL1/PL2` and offers two presets
-in the menu:
+The tray shows the current package limits as `PL1/PL2` and offers presets in the
+menu, ordered by descending PL1:
 
-| Preset | PL1 (long term) | PL2 (short term) |
-|---|---|---|
-| Eco | 105 W | 125 W |
-| Stock | 145 W | 174 W |
+| Preset key | PL1 (long term) | PL2 (short term) | Character |
+|---|---|---|---|
+| `stock` | 145 W | 174 W | Firmware default of this board |
+| `eco` | 105 W | 125 W | Measured sweet spot: ≈19 % less energy per operation, ≈7 % less throughput |
+| `80_100` | 80 W | 100 W | |
+| `70_90` | 70 W | 90 W | |
+| `60_80` | 60 W | 80 W | |
+| `50_70` | 50 W | 70 W | Lower bound where efficiency still improves |
+| `40_70` | 40 W | 70 W | |
+| `40_60` | 40 W | 60 W | |
+| `30_70` | 30 W | 70 W | Near the package floor |
+| `30_50` | 30 W | 50 W | Near the package floor |
+
+Pairs below ≈80 W cap sustained all-core clocks (measured on the reference Xeon
+E5-2696 v3: 145/174 → 2733 MHz all-core, 105/125 → 2344 MHz). They do **not**
+touch single-thread boost, which draws only ≈20–30 W of package power and stays
+under every preset here — interactive work keeps full clocks. Below ≈40 W PL1 the
+fixed package draw (uncore, L3, memory) dominates, so the energy per operation
+stops improving while latency grows; there is nothing to gain there.
 
 PL1 is the average power the package may draw over its window (here ≈ 1 s), PL2
 the ceiling allowed for a single short window (≈ 7.8 ms). Raising PL2 above PL1
 therefore changes only millisecond-scale bursts; sustained work is always bounded
 by PL1. On boards with a weak VRM a high PL2 buys nothing and stresses the power
-stage, so the preset above caps PL2 at the value the firmware advertises.
+stage, so the stock preset caps PL2 at the value the firmware advertises.
 
 The limits live under `/sys/class/powercap/intel-rapl:0`, which only root may
 write. `install.sh` therefore installs a tiny helper

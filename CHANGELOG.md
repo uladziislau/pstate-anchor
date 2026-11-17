@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions are calendar-based: `0.YYYY.MM.DD`. The leading zero marks the project
 as pre-1.0 — the CLI and the config file are stable, internal APIs are not.
 
+## [Unreleased]
+
+### Added
+
+- **Eight lower RAPL presets** next to `stock`/`eco`: `80_100`, `70_90`, `60_80`,
+  `50_70`, `40_70`, `40_60`, `30_70`, `30_50` (PL1/PL2 in watts). All of them cap
+  only sustained all-core clocks — single-thread boost draws ≈20–30 W of package
+  power and is untouched. Below ≈40 W PL1 the fixed package draw (uncore, L3,
+  memory) dominates, so nothing is gained there; the presets stop at 30 W PL1 as
+  the practical floor.
+- `parse_power_limit_spec` accepts the new keys as well as explicit `PL1/PL2`
+  watts, so `pstate-anchor --power-limit 40_60` and `--power-limit 40/60` are
+  the same thing.
+
 ## [0.2026.11.15] - 2026-11-15
 
 ### Added
