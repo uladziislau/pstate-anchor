@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 2,
+  "project": "pstate-anchor",
+  "remote": "uladziislau/pstate-anchor",
+  "class": "tool",
+  "lifecycle": "active",
+  "stateSource": {
+    "type": "backlog",
+    "path": "data/modules/development/tasks.development.json"
+  },
+  "adapter": {
+    "type": "data-only"
+  }
+}
