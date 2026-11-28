@@ -302,6 +302,28 @@ def test_power_monitor_total_and_average(pstate):
     assert round(monitor.total_avg, 2) == round(40.0 + 5.0 + 1.0, 2)
 
 
+def test_power_monitor_accumulates_session_energy(pstate):
+    monitor = pstate.PowerMonitor(window=60, interval=2.0)
+    monitor.add_gpu_sample(100.0)
+    monitor.add_rapl_samples(0, 0)
+    for step in range(1, 11):
+        # 100 W over 2 s is 200 J = 200_000_000 uJ per sample.
+        monitor.add_rapl_samples(step * 200_000_000, step * 20_000_000)
+    assert abs(monitor.pkg_wh - 2000 / 3600) < 1e-6
+    assert abs(monitor.dram_wh - 200 / 3600) < 1e-6
+    assert abs(monitor.gpu_wh - 200 / 3600) < 1e-6
+    assert abs(monitor.total_wh - 2400 / 3600) < 1e-6
+    assert monitor.as_dict()["total_wh"] == round(monitor.total_wh, 4)
+
+
+def test_power_monitor_energy_ignores_counter_wrap(pstate):
+    monitor = pstate.PowerMonitor(window=60, interval=2.0)
+    monitor.add_rapl_samples(9_000_000_000, 900_000_000)
+    monitor.add_rapl_samples(100_000_000, 10_000_000)  # wrapped backwards
+    assert monitor.pkg_wh == 0.0
+    assert monitor.dram_wh == 0.0
+
+
 def test_power_monitor_window_is_bounded(pstate):
     monitor = pstate.PowerMonitor(window=6, interval=2.0)  # 3 slots
     for value in (1.0, 2.0, 3.0, 4.0):
@@ -575,6 +597,7 @@ def test_parse_power_limit_spec_understands_presets_and_pairs(pstate):
     assert pstate.parse_power_limit_spec("eco") == (105, 125)
     assert pstate.parse_power_limit_spec(" Stock ") == (145, 174)
     assert pstate.parse_power_limit_spec("110/140") == (110, 140)
+    assert pstate.parse_power_limit_spec("200_240") == (200, 240)
     assert pstate.parse_power_limit_spec("120") == (120, 174)
 
 
@@ -627,6 +650,55 @@ def test_apply_power_limits_accepts_value_above_heuristic_ceiling(pstate, tmp_pa
     )
     assert ok, message
     assert pstate.read_power_limits(files["pl1"], files["pl2"]) == (200, 250)
+
+
+def test_read_power_limit_window_converts_microseconds(pstate, tmp_path):
+    pl1 = tmp_path / "pl1_window.us"
+    pl1.write_text("19988480\n")
+    pl2 = tmp_path / "pl2_window.us"
+    pl2.write_text("7808\n")
+    assert pstate.read_power_limit_window(str(pl1), str(pl2)) == (
+        19.98848, 0.007808
+    )
+
+
+def test_read_power_limit_window_absent(pstate, tmp_path):
+    assert pstate.read_power_limit_window(
+        str(tmp_path / "nope"), str(tmp_path / "nope2")
+    ) is None
+
+
+def test_format_power_limit_status_words_stale_firmware_max(pstate):
+    # The BIOS raised the limit: firmware still reports the old ceiling, so
+    # the status must not read "max 145/290" as if 200/240 were impossible.
+    assert pstate.format_power_limit_status((200, 240), (145, 290)) == (
+        "PL1/PL2: 200/240 W (above firmware max 145/290 W)"
+    )
+    assert pstate.format_power_limit_status((145, 174), (145, 290)) == (
+        "PL1/PL2: 145/174 W (firmware max 145/290 W)"
+    )
+    at_ceiling = pstate.format_power_limit_status((145, 290), (145, 290))
+    assert "above" not in at_ceiling
+
+
+def test_format_power_limit_status_includes_window(pstate):
+    text = pstate.format_power_limit_status(
+        (200, 240), (145, 290), (19.98848, 0.007808)
+    )
+    assert text.endswith("· window 20 s")
+
+
+def test_format_power_limit_status_without_rapl(pstate):
+    assert pstate.format_power_limit_status(None, None) == (
+        "PL1/PL2: — (RAPL limits absent)"
+    )
+
+
+def test_power_limit_above_firmware_max_only_when_exceeded(pstate):
+    assert pstate.power_limit_above_firmware_max((200, 240), (145, 290))
+    assert not pstate.power_limit_above_firmware_max((145, 240), (145, 290))
+    assert not pstate.power_limit_above_firmware_max(None, (145, 290))
+    assert not pstate.power_limit_above_firmware_max((200, 240), None)
 
 
 class _FakeResult:

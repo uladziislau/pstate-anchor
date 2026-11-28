@@ -6,8 +6,9 @@
 # PL1 is the long-term limit, PL2 the short-term one, both in whole watts.
 # Invoked by P-State Anchor as `sudo -n /usr/local/libexec/pstate-anchor/power-limit …`,
 # so the argument surface must stay this narrow: two positive integers, nothing
-# else. The firmware ceiling (constraint_*_max_power_uw) is enforced here as
-# well, because PL1 often cannot be raised above its own maximum.
+# else. The firmware-reported ceiling (constraint_*_max_power_uw) is not
+# enforced here: on boards whose BIOS exposes a higher limit it goes stale, and
+# the kernel accepts the write.
 #
 # Exit codes: 0 limits written, 2 usage error, 3 RAPL not available,
 #             4 value out of range, 5 write failed.

@@ -23,7 +23,7 @@ import time
 from collections import deque
 from statistics import mean
 
-__version__ = "0.2026.11.15"
+__version__ = "0.2026.11.28"
 
 # ── configuration surface ─────────────────────────────────
 # Every path below can be overridden through the environment. That keeps the
@@ -72,6 +72,8 @@ DEFAULT_PSTATES = {
 #: The kernel accepts any value; the firmware maxima are a heuristic, not a
 #: kernel-enforced limit.
 POWER_LIMIT_PRESETS = {
+    "200_240": (200, 240),
+    "175_210": (175, 210),
     "stock": (145, 174),
     "eco": (105, 125),
     "80_100": (80, 100),
@@ -84,6 +86,8 @@ POWER_LIMIT_PRESETS = {
     "30_50": (30, 50),
 }
 POWER_LIMIT_LABELS = {
+    "200_240": "200/240 W (BIOS max)",
+    "175_210": "175/210 W",
     "stock": "Stock 145/174 W",
     "eco": "Eco 105/125 W",
     "80_100": "80/100 W",
@@ -172,6 +176,14 @@ RAPL_PL2_MAX_PATH = os.environ.get(
     "PSTATE_RAPL_PL2_MAX",
     "/sys/class/powercap/intel-rapl:0/constraint_1_max_power_uw",
 )
+RAPL_PL1_WINDOW_PATH = os.environ.get(
+    "PSTATE_RAPL_PL1_WINDOW",
+    "/sys/class/powercap/intel-rapl:0/constraint_0_time_window_us",
+)
+RAPL_PL2_WINDOW_PATH = os.environ.get(
+    "PSTATE_RAPL_PL2_WINDOW",
+    "/sys/class/powercap/intel-rapl:0/constraint_1_time_window_us",
+)
 #: Setuid-free root bridge for the power-limit writes: the tray calls
 #: `sudo -n <helper> PL1 PL2`, exactly like `cpupower` for the governor.
 POWER_LIMIT_HELPER = os.environ.get(
@@ -189,6 +201,7 @@ IPC_SOCKET = os.environ.get(
 POWER_HISTORY_SECONDS = 60
 REFRESH_INTERVAL_SECONDS = 2.0
 PIN_RETRY_SECONDS = 10.0
+LIMIT_RETRY_SECONDS = 10.0
 
 PP_SERVICE = "net.hadess.PowerProfiles"
 PP_PATH = "/net/hadess/PowerProfiles"
@@ -597,6 +610,72 @@ def power_limit_bounds(
     return pl1, pl2
 
 
+def _us_to_seconds(raw: str | None) -> float | None:
+    if raw is None:
+        return None
+    try:
+        return int(raw) / 1_000_000
+    except ValueError:
+        return None
+
+
+def read_power_limit_window(
+    pl1_path: str = RAPL_PL1_WINDOW_PATH,
+    pl2_path: str = RAPL_PL2_WINDOW_PATH,
+) -> tuple[float, float] | None:
+    """(PL1 window, PL2 window) in seconds, or None when RAPL omits them.
+
+    The window is what makes PL1 meaningful: a limit is an energy budget over
+    this period, so 200 W for 20 s is a different machine from 200 W for 1 s.
+    """
+    pl1 = _us_to_seconds(_read_text(pl1_path))
+    pl2 = _us_to_seconds(_read_text(pl2_path))
+    if pl1 is None or pl2 is None:
+        return None
+    return pl1, pl2
+
+
+def power_limit_above_firmware_max(
+    limits: tuple[int, int] | None, bounds: tuple[int, int] | None
+) -> bool:
+    """True when the live limits exceed the firmware-reported maxima.
+
+    `constraint_*_max_power_uw` goes stale when the BIOS raises the package
+    limit: it keeps reporting the old ceiling while the kernel accepts and
+    honours the higher write. Callers use this to word the status honestly.
+    """
+    if limits is None or bounds is None:
+        return False
+    return limits[0] > bounds[0] or limits[1] > bounds[1]
+
+
+def _short_seconds(value: float) -> str:
+    if value >= 1:
+        return f"{value:.1f}".rstrip("0").rstrip(".")
+    return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def format_power_limit_status(
+    limits: tuple[int, int] | None,
+    bounds: tuple[int, int] | None,
+    window: tuple[float, float] | None = None,
+) -> str:
+    """One-line status: what runs now, what firmware claims, over what window."""
+    if limits is None:
+        return "PL1/PL2: — (RAPL limits absent)"
+    text = f"PL1/PL2: {limits[0]}/{limits[1]} W"
+    if bounds is not None:
+        label = (
+            "above firmware max"
+            if power_limit_above_firmware_max(limits, bounds)
+            else "firmware max"
+        )
+        text += f" ({label} {bounds[0]}/{bounds[1]} W)"
+    if window is not None:
+        text += f" · window {_short_seconds(window[0])} s"
+    return text
+
+
 def validate_power_limits(
     pl1_w: int, pl2_w: int, bounds: tuple[int, int] | None
 ) -> str | None:
@@ -874,21 +953,31 @@ class PowerMonitor:
         self.pkg: deque[float] = deque(maxlen=size)
         self.dram: deque[float] = deque(maxlen=size)
         self._last: tuple[int, int] | None = None
+        # Session energy in watt-hours, integrated from the same samples.
+        self.gpu_wh = 0.0
+        self.pkg_wh = 0.0
+        self.dram_wh = 0.0
 
     def add_gpu_sample(self, watts: float, count: int = 1) -> None:
         self.gpu_now = watts
         self.gpu_count = count
         self.gpu.append(watts)
+        self.gpu_wh += watts * self._interval / 3600.0
 
     def add_rapl_samples(self, pkg_uj: int, dram_uj: int) -> None:
         if self._last is None:
             pkg_w = dram_w = 0.0
+            pkg_j = dram_j = 0
         else:
+            # Counter wrap-around yields a negative delta: treat as zero.
+            pkg_j = max(0, pkg_uj - self._last[0])
+            dram_j = max(0, dram_uj - self._last[1])
             pkg_w = rapl_watts(self._last[0], pkg_uj, self._interval)
             dram_w = rapl_watts(self._last[1], dram_uj, self._interval)
-            # Counter wrap-around yields a negative delta: treat as zero.
             pkg_w = max(0.0, min(pkg_w, 300.0))
             dram_w = max(0.0, min(dram_w, 50.0))
+        self.pkg_wh += pkg_j / 3_600_000_000
+        self.dram_wh += dram_j / 3_600_000_000
         self._last = (pkg_uj, dram_uj)
         self.pkg.append(pkg_w)
         self.dram.append(dram_w)
@@ -917,6 +1006,10 @@ class PowerMonitor:
     def total_avg(self) -> float:
         return self.gpu_avg + self.pkg_avg + self.dram_avg
 
+    @property
+    def total_wh(self) -> float:
+        return self.gpu_wh + self.pkg_wh + self.dram_wh
+
     def as_dict(self) -> dict:
         return {
             "gpu_now": round(self.gpu_now, 2),
@@ -927,6 +1020,10 @@ class PowerMonitor:
             "dram_avg": round(self.dram_avg, 2),
             "total_now": round(self.total_now, 2),
             "total_avg": round(self.total_avg, 2),
+            "gpu_wh": round(self.gpu_wh, 4),
+            "pkg_wh": round(self.pkg_wh, 4),
+            "dram_wh": round(self.dram_wh, 4),
+            "total_wh": round(self.total_wh, 4),
         }
 
 
@@ -962,6 +1059,7 @@ def collect_state() -> dict:
     rapl = read_rapl_counters()
     limits = read_power_limits()
     bounds = power_limit_bounds()
+    window = read_power_limit_window()
     return {
         "version": __version__,
         "governor": read_governor(),
@@ -980,6 +1078,9 @@ def collect_state() -> dict:
             "pl2_w": limits[1] if limits else None,
             "pl1_max_w": bounds[0] if bounds else None,
             "pl2_max_w": bounds[1] if bounds else None,
+            "pl1_window_s": round(window[0], 6) if window else None,
+            "pl2_window_s": round(window[1], 6) if window else None,
+            "above_firmware_max": power_limit_above_firmware_max(limits, bounds),
             "helper": POWER_LIMIT_HELPER
             if os.path.isfile(POWER_LIMIT_HELPER)
             else None,
@@ -1110,6 +1211,8 @@ if HAVE_QT:
             self._cfg = load_config()
             self._pin = read_pin()
             self._last_pin_apply = 0.0
+            self._last_limit_apply = 0.0
+            self._limit_failed = False
             self._current_label = "—"
             self._current_profile: str | None = None
             self._current_governor: str | None = None
@@ -1232,6 +1335,10 @@ if HAVE_QT:
             self._limit_menu = self._submenu("Power Limit")
             self._power_actions = []
             for key, label in POWER_LIMIT_LABELS.items():
+                # Separate above-stock presets from stock/eco and from the
+                # low-power tail: three groups read better than twelve rows.
+                if key in ("stock", "80_100"):
+                    self._limit_menu.addSeparator()
                 action = self._limit_menu.addAction(label)
                 action.setData(("power_limit", key))
                 action.setCheckable(True)
@@ -1250,6 +1357,7 @@ if HAVE_QT:
             self._info_pkg = self._info_item(self._status_menu, "PKG: —")
             self._info_dram = self._info_item(self._status_menu, "DRAM: —")
             self._info_total = self._info_item(self._status_menu, "TOTAL: —")
+            self._info_energy = self._info_item(self._status_menu, "Energy: —")
 
             self._menu.addSeparator()
             autostart = self._menu.addAction("Run at startup")
@@ -1480,6 +1588,7 @@ if HAVE_QT:
             if self._gdbus:
                 self._profile_runner.run(power_profile_command())
             self._enforce_pin()
+            self._enforce_power_limit()
             self._update_display()
 
         def _on_profile_ok(self, raw: str) -> None:
@@ -1496,6 +1605,32 @@ if HAVE_QT:
             self._last_pin_apply = time.monotonic()
             apply_governor(pin)
             self._current_governor = read_governor()
+
+        def _enforce_power_limit(self) -> None:
+            """Re-apply the saved preset when firmware or powerd reset it.
+
+            Skipped for limits set through the CLI to a non-preset pair: that
+            path stores ``None`` in the config, so the user's explicit choice
+            is never fought over.
+            """
+            key = self._cfg.get("power_limit")
+            if key not in POWER_LIMIT_PRESETS:
+                return
+            wanted = POWER_LIMIT_PRESETS[key]
+            limits = read_power_limits()
+            if limits is None or limits == wanted:
+                self._limit_failed = False
+                return
+            if time.monotonic() - self._last_limit_apply < LIMIT_RETRY_SECONDS:
+                return
+            self._last_limit_apply = time.monotonic()
+            ok, message = apply_power_limits(*wanted)
+            if ok:
+                self._limit_failed = False
+            elif not self._limit_failed:
+                # Notify once per failure streak, not every two seconds.
+                self._limit_failed = True
+                self._notify("CPU Power Limit", message, False)
 
         def _on_smi_ok(self, raw: str) -> None:
             power, pstate, count = parse_smi(raw)
@@ -1524,14 +1659,14 @@ if HAVE_QT:
 
             limits = read_power_limits()
             if limits is None:
-                self._info_power.setText("PL1/PL2: — (RAPL limits absent)")
+                self._info_power.setText(format_power_limit_status(None, None))
                 limit_title = "—"
             else:
                 pl1_w, pl2_w = limits
                 bounds = power_limit_bounds()
-                ceiling = f" (max {bounds[0]}/{bounds[1]})" if bounds else ""
+                window = read_power_limit_window()
                 self._info_power.setText(
-                    f"PL1/PL2: {pl1_w}/{pl2_w} W{ceiling}"
+                    format_power_limit_status(limits, bounds, window)
                 )
                 for action in self._power_actions:
                     preset = POWER_LIMIT_PRESETS.get(action.data()[1])
@@ -1547,6 +1682,8 @@ if HAVE_QT:
                 limit_title = POWER_LIMIT_LABELS.get(
                     preset_key, f"{pl1_w}/{pl2_w} W"
                 )
+                if window is not None:
+                    limit_title += f" · {_short_seconds(window[0])} s"
 
             power = self._power
             gpu_text = f"GPU: {power.gpu_now:.1f} W / avg {power.gpu_avg:.1f} W"
@@ -1559,6 +1696,10 @@ if HAVE_QT:
             self._info_dram.setText(f"DRAM: {dram_now} W / avg {power.dram_avg:.1f} W")
             self._info_total.setText(
                 f"TOTAL: {power.total_now:.1f} W / avg {power.total_avg:.1f} W"
+            )
+            self._info_energy.setText(
+                f"Energy: {power.total_wh:.1f} Wh (PKG {power.pkg_wh:.1f} · "
+                f"DRAM {power.dram_wh:.1f})"
             )
 
             se = self._sched_ext
@@ -1589,7 +1730,8 @@ if HAVE_QT:
                 f"CPU {governor}   Pin: {pin}\n"
                 f"Profile {profile}\n"
                 f"PKG {pkg_now} W   DRAM {dram_now} W   "
-                f"TOTAL {power.total_now:.1f} W"
+                f"TOTAL {power.total_now:.1f} W\n"
+                f"Energy {power.total_wh:.1f} Wh this session"
             )
 
         # ── IPC ───────────────────────────────────────────────

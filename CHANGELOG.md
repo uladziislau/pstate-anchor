@@ -8,8 +8,18 @@ as pre-1.0 — the CLI and the config file are stable, internal APIs are not.
 
 ## [Unreleased]
 
+## [0.2026.11.28] - 2026-11-28
+
 ### Added
 
+- **Two presets above stock**: `175_210` and `200_240` (PL1/PL2 in watts). They
+  exist for boards whose BIOS raises the package limit above the firmware-reported
+  `constraint_0_max_power_uw`: the RAPL maximum stays 145 W, while the kernel
+  accepts the higher write (measured on a Xeon E5-2696 v3: readback stays
+  200/240 W and the PCU honours it). On that reference machine the sustained draw
+  is bounded by the all-core turbo/current ceiling, not by PL1 — 60 s of mixed
+  FMA + integer load gives ≈145 W steady state and peaks of ≈159 W under both
+  145/174 and 200/240, so the gain shows only in bursts.
 - **Eight lower RAPL presets** next to `stock`/`eco`: `80_100`, `70_90`, `60_80`,
   `50_70`, `40_70`, `40_60`, `30_70`, `30_50` (PL1/PL2 in watts). All of them cap
   only sustained all-core clocks — single-thread boost draws ≈20–30 W of package
@@ -19,6 +29,31 @@ as pre-1.0 — the CLI and the config file are stable, internal APIs are not.
 - `parse_power_limit_spec` accepts the new keys as well as explicit `PL1/PL2`
   watts, so `pstate-anchor --power-limit 40_60` and `--power-limit 40/60` are
   the same thing.
+- **PL1 window in the status**: `read_power_limit_window` reads
+  `constraint_*_time_window_us`; the Status line and the submenu title now carry
+  the window (`PL1/PL2: 200/240 W (above firmware max 145/290 W) · window 20 s`).
+  A limit without its window is ambiguous — 200 W over 20 s is an energy budget.
+- **Session energy in Wh**: `PowerMonitor` integrates package, DRAM and GPU
+  samples into watt-hours, shown in Status and in the tooltip. It is the direct
+  answer to "how much less does this machine draw now".
+- `--dump-state` reports `pl1_window_s`, `pl2_window_s` and
+  `above_firmware_max` under `power_limit`.
+
+### Changed
+
+- **Honest limit status**: the old wording `PL1/PL2: 200/240 W (max 145/290)`
+  read as "cannot go higher", although the PCU honours 200/240 W after a BIOS
+  change. The line now distinguishes `firmware max` from `above firmware max`:
+  the firmware-reported ceiling is a heuristic that goes stale, not an
+  enforcement point (`format_power_limit_status`,
+  `power_limit_above_firmware_max`).
+- The Power Limit submenu is split into three groups — above stock, stock/eco,
+  low-power tail — instead of twelve rows in a row.
+- A saved preset is re-applied not only at start-up but whenever external
+  changes (powerd, a BIOS reset after resume) alter the live pair; the check
+  runs about every 10 s and the notification fires once per failure streak.
+  Limits set from the CLI with explicit watts store `null` and are never fought
+  over.
 
 ## [0.2026.11.15] - 2026-11-15
 

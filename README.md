@@ -37,8 +37,8 @@ each domain, so the collapsed menu already answers "what is active now":
 | **Governor: …** | CPU governor list from `scaling_available_governors` (includes `schedutil`); the chosen governor is **pinned** so automation stops reverting it. "Follow system (unpin)" releases the pin |
 | **sched_ext: …** | Linux sched_ext BPF schedulers via `scxctl`: pick a scheduler (`scx_mlfq`, `scx_rusty`, …) or its configured mode, or return to the kernel default (EEVDF). Title shows the live `scheduler · mode` |
 | **GPU: …** | P0 / P2 / P3 / P5 / P8 plus Auto (driver control); the choice survives reboots |
-| **Power Limit: …** | RAPL PL1/PL2 presets (`Stock`, `Eco`) applied via the root helper; the title shows the active preset or the raw watt values |
-| **Status** | Current governor, active pin, profile, P-state, GPU power, CPU package and DRAM — instant and 1-minute average |
+| **Power Limit: …** | RAPL PL1/PL2 presets applied via the root helper, grouped above-stock / stock-eco / low-power; the title and Status line show what actually runs, the PL1 window (e.g. `20 s`), and — when the BIOS raised the limit — that the firmware maximum is stale rather than a ceiling |
+| **Status** | Current governor, active pin, profile, P-state, GPU power, CPU package and DRAM — instant and 1-minute average — plus session energy in Wh |
 | **Run at startup** | Autostart with the desktop (the `.desktop` file is generated) |
 
 The tray icon shows the current P-state and is drawn at runtime (no image
@@ -211,6 +211,8 @@ menu, ordered by descending PL1:
 
 | Preset key | PL1 (long term) | PL2 (short term) | Character |
 |---|---|---|---|
+| `200_240` | 200 W | 240 W | BIOS-raised ceiling (above the RAPL-reported maximum of 145 W) |
+| `175_210` | 175 W | 210 W | Between stock and the BIOS ceiling |
 | `stock` | 145 W | 174 W | Firmware default of this board |
 | `eco` | 105 W | 125 W | Measured sweet spot: ≈19 % less energy per operation, ≈7 % less throughput |
 | `80_100` | 80 W | 100 W | |
@@ -229,7 +231,7 @@ under every preset here — interactive work keeps full clocks. Below ≈40 W PL
 fixed package draw (uncore, L3, memory) dominates, so the energy per operation
 stops improving while latency grows; there is nothing to gain there.
 
-PL1 is the average power the package may draw over its window (here ≈ 1 s), PL2
+PL1 is the average power the package may draw over its window (here ≈ 20 s), PL2
 the ceiling allowed for a single short window (≈ 7.8 ms). Raising PL2 above PL1
 therefore changes only millisecond-scale bursts; sustained work is always bounded
 by PL1. On boards with a weak VRM a high PL2 buys nothing and stresses the power
@@ -243,6 +245,18 @@ watts. The firmware-reported maxima (`constraint_*_max_power_uw`) are a heuristi
 (TDP / 2×TDP), not a kernel-enforced limit — the kernel accepts higher values,
 and the helper leaves enforcement to it. Without the sudoers rule the limits are
 still displayed, but the menu cannot change them.
+
+Because the firmware maximum goes stale after a BIOS change, the Status line
+words it explicitly: `PL1/PL2: 200/240 W (above firmware max 145/290 W)` means
+the write was accepted and the reported ceiling no longer describes the machine.
+The same line carries the PL1 window (`· window 20 s`), without which the limit
+is ambiguous: 200 W over 20 s is an energy budget, not a cap on the instant draw.
+
+A saved preset is re-applied on start-up, and also whenever something else
+(powerd, a BIOS reset after resume) changes the limits behind the tray's back —
+the tray compares the live pair with the saved preset about every 10 s and
+restores it. Limits set from the CLI with explicit watts are stored as `null`,
+so that explicit choice is never fought over.
 
 ## P-states
 
